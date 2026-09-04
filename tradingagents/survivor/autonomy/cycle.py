@@ -10,6 +10,7 @@ System-level corruption (ledger/accounting) halts the entire runtime.
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -84,22 +85,30 @@ class CycleReport:
 
     def render(self) -> str:
         gbp = lambda p: f"£{p / 100:.2f}"  # noqa: E731
-        return (
-            "\nSURVIVOR CYCLE\n\n"
-            f"Cycle: {self.cycle_id}\n"
-            f"Markets discovered: {self.markets_discovered}\n"
-            f"Passed deterministic filters: {self.passed_filters}\n"
-            f"Research candidates: {self.research_candidates}\n"
-            f"AI researched: {self.ai_researched}\n"
-            f"Skipped for budget: {self.skipped_budget}\n"
-            f"Trade proposals: {self.trade_proposals}\n"
-            f"Approved: {self.approved}\n"
-            f"Rejected: {self.rejected}\n"
-            f"Paper trades: {self.paper_trades}\n"
-            f"AI cost: {gbp(self.ai_cost_pence)}\n"
-            f"Cycle duration: {self.duration_sec:.0f} sec\n"
-            f"State: {self.status}\n"
-        )
+        lines = [
+            "",
+            "SURVIVOR CYCLE",
+            "",
+            f"Cycle: {self.cycle_id}",
+            f"Markets discovered: {self.markets_discovered}",
+            f"Passed deterministic filters: {self.passed_filters}",
+            f"Research candidates: {self.research_candidates}",
+            f"AI researched: {self.ai_researched}",
+            f"Skipped for budget: {self.skipped_budget}",
+            f"Trade proposals: {self.trade_proposals}",
+            f"Approved: {self.approved}",
+            f"Rejected: {self.rejected}",
+            f"Paper trades: {self.paper_trades}",
+            f"AI cost: {gbp(self.ai_cost_pence)}",
+            f"Cycle duration: {self.duration_sec:.0f} sec",
+            f"State: {self.status}",
+        ]
+        if self.candidate_failures:
+            # Fail closed: research problems are surfaced, never silent.
+            lines.append("Candidate failures:")
+            for failure in self.candidate_failures:
+                lines.append(f"  - {failure.get('market_id')}: {failure.get('reason')}")
+        return "\n".join(lines) + "\n"
 
 
 def autonomy_enabled(config: dict | None = None) -> bool:
@@ -120,38 +129,154 @@ def _int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     return int(raw) if raw else default
 
+
+_P_YES_RE = re.compile(r"P\s*\(\s*YES\s*\)\s*[:=]\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
+
+# API-key environment variables for the providers referenced by the ModelRouter
+# role routes (deterministic preflight — never an LLM call).
+_PROVIDER_KEY_ENV = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _market_evidence_context(candidate: Candidate, quote: QuoteSnapshot) -> str:
+    """Deterministic research context built ONLY from the stored decision-time
+    snapshot. Untrusted market text is wrapped by build_evidence; the agents
+    are instructed never to replace the snapshot with fresh market data."""
+    snap = candidate.snapshot
+    question_block = build_evidence("market_question", snap.question).render()
+    header = "\n".join([
+        "INSTRUMENT: binary prediction market (paper-only trial; identifier only, not a stock ticker).",
+        f"market_id: {snap.market_id}",
+        f"provider: {snap.provider}",
+        f"symbol_or_slug: {snap.symbol_or_slug}",
+        f"market_type: {snap.market_type}",
+        f"resolution_status: {snap.resolution_status.value}",
+        f"market-implied YES probability (bps of 1.00): {snap.market_probability_bps}",
+        f"YES bid/ask (bps): {snap.bid}/{snap.ask}",
+        f"liquidity (USD minor units): {snap.liquidity.minor_units if snap.liquidity else 'unknown'}",
+        f"24h volume (USD minor units): {snap.volume_24h.minor_units if snap.volume_24h else 'unknown'}",
+        f"close time (UTC): {snap.close_time_utc or 'unknown'}",
+        f"decision-time snapshot timestamp (UTC): "
+        f"{snap.source_timestamp_utc or snap.timestamp_utc or quote.timestamp_utc}",
+        "resolution criteria: as defined by the official market question and the provider's rules "
+        "(see the untrusted question block below).",
+        "POINT-IN-TIME RULE: reason ONLY from the decision-time snapshot above. News, search and "
+        "market-data tools may supply general background, but any current market quote that "
+        "differs from the snapshot MUST NOT replace it.",
+        "FINAL DECISION FORMAT: your final decision MUST include a line exactly "
+        "'P(YES): <NN>%' where <NN> is your calibrated probability estimate (0-100) that this "
+        "binary event resolves YES.",
+    ])
+    return f"{header}\n\n{question_block}"
+
+
+def _research_failure(reason: str, run_id: str | None) -> ResearchResult:
+    return ResearchResult(status="FAILED", reason=reason[:200], run_id=run_id)
+
+
+def _classify_inference_error(exc: Exception) -> str:
+    """Fail-closed reason classification for research backend errors."""
+    name = type(exc).__name__
+    msg = str(exc)
+    low = msg.lower()
+    if name == "BudgetExhaustedError" or "budget" in low and "exhaust" in low:
+        return f"AI_BUDGET_UNAVAILABLE: {msg}"
+    if name in ("ModelNotAllowedError", "UnknownPriceError", "UnhealthyProviderError", "NoRouteError") \
+            or "no model route" in low or "not allowed" in low or "unpriced" in low:
+        return f"NO_MODEL_ROUTE: {msg}"
+    if any(k in low for k in ("api key", "unauthorized", "401", "auth", "credential", "api_key")):
+        return f"NO_LLM_PROVIDER: {msg}"
+    return f"INFERENCE_FAILED: {msg}"
+
+
 def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, run_id: str) -> ResearchResult:
     """Default research: run the existing TradingAgents multi-agent pipeline
     (analysts -> bull/bear -> research manager -> trader -> risk -> PM) under
-    the mandatory SURVIVOR ModelRouter/BudgetManager control plane."""
-    from tradingagents.default_config import DEFAULT_CONFIG
-    from tradingagents.graph.trading_graph import TradingAgentsGraph
+    the mandatory SURVIVOR ModelRouter/BudgetManager control plane.
 
-    question = build_evidence("market_question", candidate.snapshot.question).render()
+    The candidate is a binary prediction market, not a stock ticker, so the
+    stored decision-time snapshot is injected as the deterministic instrument
+    context (untrusted text wrapped by build_evidence) and the market_id/slug
+    is used purely as an identifier — never as a fake ticker.
+    """
+    config = config or {}
+    snapshot = candidate.snapshot
+    symbol = snapshot.symbol_or_slug or snapshot.market_id
+
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+    except ImportError as exc:
+        return _research_failure(f"RESEARCH_BACKEND_UNAVAILABLE: {exc}", run_id)
+
     research_config = {
         **DEFAULT_CONFIG,
-        **(config or {}),
+        **config,
+        # Phase 1 guarded inference path is mandatory for autonomous research:
+        # every agent call is role-routed, budget-authorized and settled.
+        "survivor_enabled": True,
+        # The graph must NOT execute anything itself: the autonomous cycle owns
+        # RiskEngine + PaperBroker (and dry-run stops before execute).
+        "survivor_paper_enabled": False,
+        "survivor_run_id": run_id,
+        "survivor_instrument_context": _market_evidence_context(candidate, quote),
         "survivor_paper_inputs": {
             **(config or {}).get("survivor_paper_inputs", {}),
-            "symbol": candidate.snapshot.market_id,
-            "market": candidate.snapshot.market_type,
+            "symbol": snapshot.market_id,
+            "market": snapshot.market_type,
             "bid_pence": quote.bid_pence,
             "ask_pence": quote.ask_pence,
             "snapshot_timestamp_utc": quote.timestamp_utc,
             "run_id": run_id,
         },
     }
-    graph = TradingAgentsGraph(config=research_config)
-    final_state, _signal = graph.propagate(question, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
-    inputs = research_config.get("survivor_paper_inputs", {})
+    # Route router settlements into the cycle's usage ledger DB so budget
+    # preflight and cost attribution see the same spend.
+    usage = config.get("_usage_ledger")
+    if usage is not None:
+        research_config["survivor_usage_ledger_path"] = str(usage.db_path)
+
+    try:
+        graph = TradingAgentsGraph(config=research_config)
+        trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        final_state, _signal = graph.propagate(symbol, trade_date, asset_type="prediction_market")
+    except ImportError as exc:
+        return _research_failure(f"RESEARCH_BACKEND_UNAVAILABLE: {exc}", run_id)
+    except Exception as exc:  # noqa: BLE001 - classified below, never silent
+        return _research_failure(_classify_inference_error(exc), run_id)
+
+    usage_summary = usage.get_run_usage_summary(run_id) if usage is not None else {}
+    ai_cost_pence = int(usage_summary.get("total_cost_pence") or 0)
+
+    decision_text = str((final_state or {}).get("final_trade_decision") or "")
+    match = _P_YES_RE.search(decision_text)
+    if not match:
+        return _research_failure(
+            "RESEARCH_NO_PROBABILITY_ESTIMATE: final decision missing 'P(YES): <NN>%' line",
+            run_id,
+        )
+    probability_bps = min(10000, max(0, round(float(match.group(1)) * 100)))
+
     return ResearchResult(
-        decision_text=str(final_state.get("final_trade_decision") or "NO_TRADE"),
-        expected_probability_bps=inputs.get("expected_probability_bps"),
-        quantity=inputs.get("quantity"),
-        spread_cost_bps=inputs.get("spread_cost_bps", 0),
-        slippage_bps=inputs.get("slippage_bps", 0),
-        fee_bps=inputs.get("fee_bps", 0),
-        uncertainty_penalty_bps=inputs.get("uncertainty_penalty_bps", 0),
+        decision_text=decision_text,
+        expected_probability_bps=probability_bps,
+        # Deterministic paper sizing: one contract; the RiskEngine enforces the
+        # position/notional caps. The LLM contributes direction + probability only.
+        quantity=1,
+        spread_cost_bps=max(0, (snapshot.ask or 0) - (snapshot.bid or 0)),
+        slippage_bps=0,
+        fee_bps=0,
+        uncertainty_penalty_bps=0,
+        ai_cost_pence=ai_cost_pence,
         run_id=run_id,
     )
 
@@ -264,8 +389,16 @@ def _run_cycle_body(
     report.markets_discovered = scan.discovered
     report.passed_filters = len(scan.candidates)
     report.research_candidates = len(scan.top)
+    # Decision time is NOW (after the scan): adapter snapshots are stamped at
+    # fetch time, which is necessarily later than the cycle-start timestamp, so
+    # the point-in-time check below must compare against this moment — not the
+    # cycle start — or every freshly fetched snapshot looks like future data.
+    current = datetime.now(timezone.utc)
 
     usage = usage_ledger or InferenceUsageLedger()
+    # Expose the cycle's usage ledger to the research backend so router
+    # settlements land in the same DB and run costs can be attributed.
+    config["_usage_ledger"] = usage
     survivor_policy = policy or SurvivorPolicy.from_env()
     research_fn = research_fn or _default_research
     builder = ProposalBuilder()
@@ -293,6 +426,10 @@ def _run_cycle_body(
             if snap_ts > current:
                 state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
                                        candidate.score, "NO_TRADE", "SKIPPED", "STALE_DATA")
+                # fail closed: a selected candidate must never silently vanish
+                report.candidate_failures.append(
+                    {"market_id": snapshot.market_id, "reason": "SKIPPED_STALE_DATA"}
+                )
                 continue
 
             # budget preflight BEFORE any AI call (no partial research)
@@ -310,6 +447,12 @@ def _run_cycle_body(
                 ask_pence=_bps_to_pence(snapshot.ask),
                 timestamp_utc=snapshot.source_timestamp_utc or snapshot.timestamp_utc,
             )
+            if research_fn is None:
+                # Fail closed: a selected candidate must never silently vanish.
+                reason = "RESEARCH_CALLBACK_MISSING"
+                report.candidate_failures.append({"market_id": snapshot.market_id, "reason": reason})
+                state.record_research(cycle_id, snapshot.market_id, run_id, "FAILED", reason)
+                continue
             result = research_fn(candidate, quote, config, run_id)
             if result.status != "OK" or result.expected_probability_bps is None or result.quantity is None:
                 report.candidate_failures.append(

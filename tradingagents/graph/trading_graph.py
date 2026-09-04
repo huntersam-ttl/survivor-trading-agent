@@ -122,10 +122,19 @@ class TradingAgentsGraph:
         if self.config.get("backend_url"):
             self.survivor_llm_kwargs["base_url"] = self.config["backend_url"]
         if is_survivor_enabled(self.config):
+            from tradingagents.llm_clients.budget import BudgetManager
             from tradingagents.llm_clients.router import ModelRouter
+            from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
             from tradingagents.survivor import get_policy
 
-            self.survivor_router = ModelRouter(get_policy(self.config))
+            policy = get_policy(self.config)
+            # Opt-in shared usage ledger: when set (e.g. by the autonomous
+            # cycle), router settlements land in the SAME database the cycle's
+            # budget preflight reads, so spend accounting is consistent.
+            ledger_path = self.config.get("survivor_usage_ledger_path")
+            ledger = InferenceUsageLedger(db_path=ledger_path) if ledger_path else None
+            budget_manager = BudgetManager(policy, ledger=ledger) if ledger else None
+            self.survivor_router = ModelRouter(policy, budget_manager=budget_manager)
             logger.info("Survivor control plane enabled: model routing + budget enforcement active.")
 
         deep_client = create_llm_client(
@@ -545,9 +554,10 @@ class TradingAgentsGraph:
         if getattr(self, "survivor_router", None) is not None:
             from tradingagents.survivor.guard import set_survivor_run
 
-            survivor_tokens = set_survivor_run(
-                run_id=f"{company_name}_{trade_date}", ticker_or_market=company_name
-            )
+            # Callers (e.g. the autonomous cycle) may pin the run identity so
+            # usage-ledger records tie back to the exact cycle research run.
+            run_id = str(self.config.get("survivor_run_id") or f"{company_name}_{trade_date}")
+            survivor_tokens = set_survivor_run(run_id=run_id, ticker_or_market=company_name)
         try:
             # Class-level call (not self._run_graph_body) so the real body runs
             # even when _run_graph is bound onto a mock (see test_full_pipeline_no_regression).
@@ -570,7 +580,15 @@ class TradingAgentsGraph:
         past_context = self.memory_log.get_past_context(
             company_name, as_of=self._memory_as_of(trade_date)
         )
-        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        # Callers may supply a fully-resolved deterministic instrument context
+        # (e.g. the autonomous cycle's prediction-market snapshot evidence) so
+        # no agent makes a ticker-oriented lookup for a non-ticker instrument.
+        instrument_override = self.config.get("survivor_instrument_context")
+        instrument_context = (
+            str(instrument_override)
+            if instrument_override
+            else self.resolve_instrument_context(company_name, asset_type)
+        )
         init_agent_state = self.propagator.create_initial_state(
             company_name,
             trade_date,

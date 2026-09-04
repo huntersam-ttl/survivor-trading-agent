@@ -34,6 +34,7 @@ from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
+from tradingagents.survivor.runtime import is_survivor_enabled
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
@@ -112,6 +113,20 @@ class TradingAgentsGraph:
         if self.callbacks:
             llm_kwargs["callbacks"] = self.callbacks
 
+        # Survivor control plane (disabled by default: upstream behaviour is
+        # fully preserved). When enabled, all agent LLM calls are routed
+        # through the ModelRouter with budget authorization and settlement.
+        self.survivor_router = None
+        self.survivor_llm_kwargs: dict[str, Any] = dict(llm_kwargs)
+        if self.config.get("backend_url"):
+            self.survivor_llm_kwargs["base_url"] = self.config["backend_url"]
+        if is_survivor_enabled(self.config):
+            from tradingagents.llm_clients.router import ModelRouter
+            from tradingagents.survivor import get_policy
+
+            self.survivor_router = ModelRouter(get_policy(self.config))
+            logger.info("Survivor control plane enabled: model routing + budget enforcement active.")
+
         deep_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["deep_think_llm"],
@@ -128,6 +143,18 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
 
+        if self.survivor_router is not None:
+            from tradingagents.survivor.guard import SurvivorLLM
+
+            # Default lanes for non-graph consumers (Reflector, SignalProcessor);
+            # graph nodes get role-specific proxies inside GraphSetup.
+            self.deep_thinking_llm = SurvivorLLM(
+                self.survivor_router, role="research_manager", llm_kwargs=self.survivor_llm_kwargs
+            )
+            self.quick_thinking_llm = SurvivorLLM(
+                self.survivor_router, role="quick_analyst", llm_kwargs=self.survivor_llm_kwargs
+            )
+
         self.memory_log = TradingMemoryLog(self.config)
 
         # Create tool nodes
@@ -143,6 +170,8 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            survivor_router=self.survivor_router,
+            survivor_llm_kwargs=self.survivor_llm_kwargs,
         )
 
         self.propagator = Propagator(
@@ -508,6 +537,30 @@ class TradingAgentsGraph:
 
     def _run_graph(self, company_name, trade_date, asset_type: str = "stock",
                    checkpoint_thread_id: str | None = None):
+        """Execute the graph and write the resulting state to disk and memory log."""
+        # Tag every Survivor-guarded LLM call with this run's identity so the
+        # usage ledger records run_id and ticker_or_market correctly.
+        survivor_tokens = None
+        if getattr(self, "survivor_router", None) is not None:
+            from tradingagents.survivor.guard import set_survivor_run
+
+            survivor_tokens = set_survivor_run(
+                run_id=f"{company_name}_{trade_date}", ticker_or_market=company_name
+            )
+        try:
+            # Class-level call (not self._run_graph_body) so the real body runs
+            # even when _run_graph is bound onto a mock (see test_full_pipeline_no_regression).
+            return TradingAgentsGraph._run_graph_body(
+                self, company_name, trade_date, asset_type, checkpoint_thread_id
+            )
+        finally:
+            if survivor_tokens is not None:
+                from tradingagents.survivor.guard import reset_survivor_run
+
+                reset_survivor_run(survivor_tokens)
+
+    def _run_graph_body(self, company_name, trade_date, asset_type: str = "stock",
+                        checkpoint_thread_id: str | None = None):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents. On a

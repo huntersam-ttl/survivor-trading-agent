@@ -26,6 +26,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    "TRADINGAGENTS_SURVIVOR_ENABLED":        "survivor_enabled",
 }
 
 
@@ -109,6 +110,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
+    # Survivor Control Plane (safety, budget manager, role routing)
+    "survivor_enabled": False,
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",

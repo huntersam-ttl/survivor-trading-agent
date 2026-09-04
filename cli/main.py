@@ -1301,8 +1301,9 @@ def run_analysis(checkpoint: bool | None = None):
         display_complete_report(final_state)
 
 
-@app.command()
-def analyze(
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
     checkpoint: bool | None = typer.Option(
         None,
         "--checkpoint/--no-checkpoint",
@@ -1315,23 +1316,57 @@ def analyze(
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
 ):
-    if clear_checkpoints:
-        from tradingagents.graph.checkpointer import clear_all_checkpoints
-        n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
-        console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
-    try:
-        run_analysis(checkpoint=checkpoint)
-    except _NO_CONSOLE_ERRORS:
-        # A terminal with no console buffer cannot host the interactive prompts.
-        # Emit one actionable line on stderr instead of a prompt_toolkit
-        # traceback; plain text, since rich may not render here either (#1138).
-        typer.echo(
-            "Error: no Windows console available. The interactive CLI needs a real "
-            "console buffer — run it from Windows Terminal, PowerShell, or cmd.exe "
-            "rather than a piped or embedded terminal.",
-            err=True,
-        )
-        raise typer.Exit(code=1) from None
+    if ctx.invoked_subcommand is None:
+        if clear_checkpoints:
+            from tradingagents.graph.checkpointer import clear_all_checkpoints
+            n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
+            console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
+        try:
+            run_analysis(checkpoint=checkpoint)
+        except _NO_CONSOLE_ERRORS:
+            # A terminal with no console buffer cannot host the interactive prompts.
+            # Emit one actionable line on stderr instead of a prompt_toolkit
+            # traceback; plain text, since rich may not render here either (#1138).
+            typer.echo(
+                "Error: no Windows console available. The interactive CLI needs a real "
+                "console buffer — run it from Windows Terminal, PowerShell, or cmd.exe "
+                "rather than a piped or embedded terminal.",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
+
+
+@app.command(name="survivor-budget")
+def survivor_budget_cmd():
+    """Display current Survivor AI budget usage and hard limits."""
+    from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
+    from tradingagents.survivor import get_policy
+
+    policy = get_policy()
+    ledger = InferenceUsageLedger()
+
+    op_d = ledger.get_daily_spend_pence("openai")
+    ds_d = ledger.get_daily_spend_pence("deepseek")
+    mm_d = ledger.get_daily_spend_pence("minimax")
+    gl_d = ledger.get_daily_spend_pence(None)
+
+    op_m = ledger.get_monthly_spend_pence("openai")
+    ds_m = ledger.get_monthly_spend_pence("deepseek")
+    mm_m = ledger.get_monthly_spend_pence("minimax")
+    gl_m = ledger.get_monthly_spend_pence(None)
+
+    console.print("\n[bold cyan]SURVIVOR AI BUDGET[/bold cyan]\n")
+    console.print("[bold]Today:[/bold]")
+    console.print(f"OpenAI   £{op_d / 100:.2f} / £{policy.openai_daily_pence / 100:.2f}")
+    console.print(f"DeepSeek £{ds_d / 100:.2f} / £{policy.deepseek_daily_pence / 100:.2f}")
+    console.print(f"MiniMax  £{mm_d / 100:.2f} / £{policy.minimax_daily_pence / 100:.2f}")
+    console.print(f"Global   £{gl_d / 100:.2f} / £{policy.global_daily_pence / 100:.2f}\n")
+
+    console.print("[bold]Month:[/bold]")
+    console.print(f"OpenAI   £{op_m / 100:.2f} / £{policy.openai_monthly_pence / 100:.2f}")
+    console.print(f"DeepSeek £{ds_m / 100:.2f} / £{policy.deepseek_monthly_pence / 100:.2f}")
+    console.print(f"MiniMax  £{mm_m / 100:.2f} / £{policy.minimax_monthly_pence / 100:.2f}")
+    console.print(f"Global   £{gl_m / 100:.2f} / £{policy.global_monthly_pence / 100:.2f}\n")
 
 
 if __name__ == "__main__":

@@ -1526,5 +1526,76 @@ def survivor_daemon_cmd(
         _time.sleep(interval)
 
 
+@app.command(name="survivor-performance")
+def survivor_performance_cmd(
+    fmt: str = typer.Option("text", "--fmt", help="text | json | csv"),
+):
+    """Read-only performance evaluation (Brier, P/L, gate). Never authorizes live trading."""
+    from tradingagents.survivor.evaluation.evaluate import (
+        evaluate_performance,
+        export_csv,
+        export_json,
+    )
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+    from tradingagents.survivor.execution.ledger import PaperLedger
+
+    store = EvaluationStore()
+    paper_path = os.path.expanduser("~/.tradingagents/survivor/paper.db")
+    ledger = PaperLedger(db_path=paper_path) if os.path.exists(paper_path) else None
+    try:
+        report = evaluate_performance(store, paper_ledger_path=paper_path if ledger else None)
+    except Exception as exc:
+        console.print(f"[red]Evaluation failed closed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    if fmt == "json":
+        console.print(export_json(report))
+    elif fmt == "csv":
+        trades = store.trades(strategy_version=report.strategy_version,
+                              config_hash=report.config_hash)
+        console.print(export_csv(trades) if trades else "(no trades recorded)")
+    else:
+        console.print(report.render())
+
+
+@app.command(name="survivor-calibration")
+def survivor_calibration_cmd():
+    """Read-only calibration report (bins, Brier vs market baseline)."""
+    from tradingagents.survivor.evaluation.evaluate import evaluate_performance
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+
+    store = EvaluationStore()
+    report = evaluate_performance(store)
+    console.print("\n[bold cyan]SURVIVOR CALIBRATION[/bold cyan]\n")
+    console.print(f"Strategy: {report.strategy_version} ({report.config_hash})")
+    console.print(f"Resolved predictions: {report.resolved_predictions}")
+    console.print(f"Brier: {report.brier:.4f}")
+    console.print(f"Market baseline Brier: {report.market_brier:.4f}")
+    console.print(f"Brier improvement: {report.brier_improvement * 100:+.1f}%")
+    console.print(f"Mean calibration error: {report.mean_calibration_error:.3f}")
+    console.print("Bins (predicted -> actual frequency):")
+    for b in report.calibration:
+        console.print(
+            f"  {b.lower_bps / 100:.0f}-{b.upper_bps / 100:.0f}%: n={b.count} "
+            f"pred={b.mean_predicted:.3f} actual={b.outcome_frequency:.3f} "
+            f"err={b.calibration_error:.3f}"
+        )
+
+
+@app.command(name="survivor-evaluation-status")
+def survivor_evaluation_status_cmd():
+    """Read-only evaluation status: sample size, gate, warnings."""
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+
+    store = EvaluationStore()
+    identities = store.distinct_identities()
+    predictions = store.predictions()
+    resolved = len([p for p in predictions if p.outcome is not None])
+    console.print("\n[bold cyan]SURVIVOR EVALUATION STATUS[/bold cyan]\n")
+    console.print(f"Strategy identities recorded: {identities or '(none)'}")
+    console.print(f"Prediction records: {len(predictions)}")
+    console.print(f"Resolved: {resolved}")
+    console.print(f"Trade records: {len(store.trades())}")
+
+
 if __name__ == "__main__":
     app()

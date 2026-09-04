@@ -25,8 +25,8 @@ def settle_prediction_position(
 ) -> dict | None:
     """Settle one long-YES paper position deterministically.
 
-    Returns the SETTLEMENT_APPLIED event, or None when there is nothing to
-    settle (no position / already closed).
+    Returns the SETTLEMENT_APPLIED event (with realized_pnl_pence and
+    cost_basis_pence added), or None when there is nothing to settle.
     """
     portfolio = broker.portfolio
     position = portfolio.positions.get(symbol)
@@ -82,4 +82,7 @@ def settle_prediction_position(
         risk_decision="SETTLE",
         risk_reason=f"payoff {proceeds}p, realized {realized}p",
     )
+    event["realized_pnl_pence"] = realized
+    event["cost_basis_pence"] = position.cost_basis_pence
+    event["fees_pence_total"] = position.cost_basis_pence - position.quantity * position.average_entry_price_pence
     return event

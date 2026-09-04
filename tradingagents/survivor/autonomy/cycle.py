@@ -268,6 +268,15 @@ def _run_cycle_body(
     survivor_policy = policy or SurvivorPolicy.from_env()
     research_fn = research_fn or _default_research
     builder = ProposalBuilder()
+    executed_runs: dict[str, str] = {}
+    from tradingagents.survivor.autonomy.state import snapshot_data_hash
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+    from tradingagents.survivor.evaluation.types import PredictionRecord, TradeOutcome
+    from tradingagents.survivor.evaluation.versioning import strategy_identity
+
+    eval_store = EvaluationStore(db_path=config.get("_evaluation_db_path"))
+    version, chash = strategy_identity({"min_edge_bps": limits.min_conservative_net_edge_bps})
+
 
     # 5.-9. Research top candidates, one at a time, with budget preflight
     for candidate in scan.top:
@@ -309,6 +318,22 @@ def _run_cycle_body(
             report.ai_researched += 1
             report.ai_cost_pence += result.ai_cost_pence
             state.record_research(cycle_id, snapshot.market_id, run_id, "OK")
+            eval_store.record_prediction(PredictionRecord(
+                cycle_id=cycle_id, run_id=run_id, proposal_id=f"{run_id}_prop",
+                market_id=snapshot.market_id, timestamp_utc=current.isoformat(),
+                strategy_version=version, config_hash=chash,
+                category=snapshot.market_type,
+                predicted_probability=result.expected_probability_bps / 10000,
+                market_probability=(snapshot.market_probability_bps or 0) / 10000,
+                gross_edge_bps=result.expected_probability_bps - (snapshot.market_probability_bps or 0),
+                net_edge_bps=result.expected_probability_bps - (snapshot.market_probability_bps or 0)
+                - result.spread_cost_bps - result.slippage_bps - result.fee_bps
+                - result.uncertainty_penalty_bps,
+                ai_cost_pence=result.ai_cost_pence,
+                snapshot_data_hash=snapshot_data_hash(snapshot),
+            ))
+            eval_store.record_cost_attribution(run_id, snapshot.market_id, cycle_id,
+                                               result.ai_cost_pence)
 
             proposal = builder.build(
                 run_id=run_id,
@@ -341,8 +366,19 @@ def _run_cycle_body(
             else:
                 report.rejected += 1
             if decision.approved and not dry_run_enabled(config):
+                # T. conservative fill model: cap notional vs available liquidity
+                # (conservative cross-currency proxy: notional in USD cents vs
+                # liquidity in USD minor units; £1 position cap unchanged)
+                if snapshot.liquidity is not None:
+                    fill_fraction = float(os.environ.get("SURVIVOR_FILL_FRACTION", "0.05"))
+                    notional_usd_cents = proposal.notional_pence * 100
+                    if notional_usd_cents > fill_fraction * snapshot.liquidity.minor_units:
+                        state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
+                                               candidate.score, "NO_TRADE", "SKIPPED", "FILL_RISK")
+                        continue
                 broker.execute(proposal, quote, decision)
                 report.paper_trades += 1
+                executed_runs[snapshot.market_id] = run_id
         except (LedgerCorruptionError, RuntimeError) as exc:
             # system-level failure -> halt the entire runtime
             halt_mod.set_halt()
@@ -374,10 +410,34 @@ def _run_cycle_body(
         for symbol in list(broker.portfolio.positions.keys()):
             if hasattr(adapter, "get_resolution_status"):
                 resolution = adapter.get_resolution_status(symbol)
-                if resolution.value == "YES":
-                    settle_prediction_position(broker, symbol, resolved_yes=True)
-                elif resolution.value == "NO":
-                    settle_prediction_position(broker, symbol, resolved_yes=False)
+                resolved_yes = resolution.value == "YES"
+                if resolution.value in ("YES", "NO"):
+                    settle_event = settle_prediction_position(broker, symbol, resolved_yes=resolved_yes)
+                    if settle_event is not None:
+                        run_id = executed_runs.get(symbol, f"unknown_{symbol}")
+                        outcome = 1.0 if resolved_yes else 0.0
+                        eval_store.attach_outcome(f"{run_id}_prop", outcome, current.isoformat())
+                        eval_store.record_trade(TradeOutcome(
+                            cycle_id=cycle_id, run_id=run_id,
+                            proposal_id=f"{run_id}_prop", market_id=symbol,
+                            timestamp_utc=current.isoformat(),
+                            strategy_version=version, config_hash=chash,
+                            category="prediction_binary",
+                            quantity=settle_event["quantity"],
+                            entry_price_pence=settle_event["execution_price_pence"],
+                            fees_pence=settle_event.get("fees_pence_total", 0),
+                            slippage_pence=0,
+                            gross_pnl_pence=settle_event["realized_pnl_pence"],
+                            ai_cost_pence=0,
+                            realized_return_bps=int(
+                                (settle_event["realized_pnl_pence"] * 10000)
+                                // max(1, settle_event["cost_basis_pence"])
+                            ),
+                            predicted_net_edge_bps=0,
+                            snapshot_data_hash="",
+                            outcome=outcome,
+                        ))
+
 
     report.status = "DRY_RUN" if dry_run_enabled(config) else "ACTIVE"
 

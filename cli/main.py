@@ -1396,5 +1396,135 @@ def survivor_paper_status_cmd():
     console.print(f"Trading state: {status['trading_state']}")
 
 
+@app.command(name="survivor-halt")
+def survivor_halt_cmd():
+    """Kill switch: stop all autonomous PAPER cycles (no scan, no AI, no trades)."""
+    from tradingagents.survivor.autonomy.halt import set_halt
+
+    set_halt()
+    console.print("[bold red]SURVIVOR PAPER AUTONOMY HALT set.[/bold red] "
+                  "Autonomous cycles will refuse to run until resumed.")
+
+
+@app.command(name="survivor-resume")
+def survivor_resume_cmd():
+    """Remove the PAPER autonomy halt. This NEVER enables live trading."""
+    from tradingagents.survivor.autonomy.halt import clear_halt
+
+    removed = clear_halt()
+    if removed:
+        console.print("[green]PAPER autonomy halt removed.[/green] "
+                      "Mode remains PAPER ONLY; live trading does not exist.")
+    else:
+        console.print("[yellow]No HALT file present.[/yellow]")
+
+
+@app.command(name="survivor-runtime-status")
+def survivor_runtime_status_cmd():
+    """Read-only autonomous-runtime status (mode, halt, cycles, equity, AI spend)."""
+    from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
+    from tradingagents.survivor.autonomy.halt import is_halted
+    from tradingagents.survivor.autonomy.state import RuntimeState
+    from tradingagents.survivor.execution.paper_broker import PaperBroker
+    from tradingagents.survivor.policy import SurvivorPolicy
+    from tradingagents.survivor.risk.limits import risk_limits_from_env
+
+    state = RuntimeState()
+    broker = PaperBroker(limits=risk_limits_from_env())
+    status = broker.status()
+    policy = SurvivorPolicy.from_env()
+    usage = InferenceUsageLedger()
+    last = state.last_cycle()
+
+    console.print("\n[bold cyan]SURVIVOR RUNTIME[/bold cyan]\n")
+    console.print(f"Mode: {status['mode']}")
+    console.print(f"Halt state: {'HALTED (kill switch)' if is_halted() else 'CLEAR'}")
+    console.print(f"Cycle count: {state.cycle_count()}")
+    if last:
+        console.print(f"Last cycle: {last['cycle_id']} status={last['status']} at {last['finished_utc']}")
+    console.print(f"Paper equity: £{status['equity_pence'] / 100:.2f}")
+    console.print(f"Daily P/L: £{status['daily_pnl_pence'] / 100:.2f}")
+    console.print(f"Drawdown: {status['drawdown_bps'] / 100:.2f}%")
+    console.print(f"Open positions: {status['open_positions']}")
+    console.print(f"AI daily spend: £{usage.get_daily_spend_pence(None) / 100:.2f} / £{policy.global_daily_pence / 100:.2f}")
+    console.print(f"AI monthly spend: £{usage.get_monthly_spend_pence(None) / 100:.2f} / £{policy.global_monthly_pence / 100:.2f}")
+
+
+@app.command(name="survivor-scan")
+def survivor_scan_cmd():
+    """Read-only deterministic market scan + rank. NO AI, NO trades."""
+    from tradingagents.survivor.autonomy.halt import is_halted
+    from tradingagents.survivor.execution.paper_broker import PaperBroker
+    from tradingagents.survivor.markets.filters import scan_limits_from_env
+    from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
+    from tradingagents.survivor.markets.scanner import MarketScanner
+    from tradingagents.survivor.risk.limits import risk_limits_from_env
+
+    if is_halted():
+        console.print("[bold red]EXTERNAL_HALT:[/bold red] HALT file present; scan refused.")
+        raise typer.Exit(code=1)
+    broker = PaperBroker(limits=risk_limits_from_env())
+    halted = broker.trading_state() != "ACTIVE"
+    open_symbols = frozenset(
+        s for s, p in broker.portfolio.positions.items() if p.quantity > 0
+    ) if broker.ledger.events() else frozenset()
+    scanner = MarketScanner(
+        PolymarketAdapter(), limits=scan_limits_from_env(),
+        max_candidates_per_cycle=int(os.environ.get("SURVIVOR_MAX_CANDIDATES_PER_CYCLE", "40")),
+        max_research_candidates_per_cycle=int(os.environ.get("SURVIVOR_MAX_RESEARCH_PER_CYCLE", "3")),
+    )
+    scan = scanner.scan(open_position_symbols=open_symbols, trading_halted=halted)
+    console.print(f"\n[bold cyan]SURVIVOR SCAN[/bold cyan] ({scanner.adapter.provider})\n")
+    console.print(f"Markets discovered: {scan.discovered}")
+    console.print(f"Normalized: {scan.normalized}")
+    console.print(f"Passed filters: {len(scan.candidates)}")
+    rejections: dict[str, int] = {}
+    for _, reason in scan.rejected:
+        rejections[reason.value] = rejections.get(reason.value, 0) + 1
+    for reason, count in sorted(rejections.items(), key=lambda kv: -kv[1]):
+        console.print(f"  rejected {reason}: {count}")
+    console.print("Top research candidates (no AI used):")
+    for candidate in scan.top:
+        console.print(
+            f"  #{candidate.rank} [{candidate.score:.1f}] "
+            f"{candidate.snapshot.question[:80]} "
+            f"(p={candidate.snapshot.market_probability_bps / 100:.1f}%)"
+        )
+
+
+@app.command(name="survivor-run-once")
+def survivor_run_once_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Scan + research + risk, but NO paper execution."),
+):
+    """Run exactly ONE complete autonomous PAPER cycle."""
+    from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
+
+    config = {"survivor_dry_run": dry_run}
+    report = run_survivor_cycle(config)
+    console.print(report.render())
+
+
+@app.command(name="survivor-daemon")
+def survivor_daemon_cmd(
+    interval: int = typer.Option(
+        int(os.environ.get("SURVIVOR_CYCLE_INTERVAL_SECONDS", "900")),
+        help="Seconds between cycles (minimum 300 unless SURVIVOR_TEST_MODE=true).",
+    ),
+):
+    """Invoke tested single cycles on an interval. No logic duplicated here."""
+    import time as _time
+
+    from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
+
+    test_mode = os.environ.get("SURVIVOR_TEST_MODE", "").lower() in ("true", "1", "yes", "on")
+    min_interval = 1 if test_mode else 300
+    interval = max(interval, min_interval)
+    console.print(f"[cyan]SURVIVOR daemon: one PAPER cycle every {interval}s (Ctrl-C to stop).[/cyan]")
+    while True:
+        report = run_survivor_cycle()
+        console.print(report.render())
+        _time.sleep(interval)
+
+
 if __name__ == "__main__":
     app()

@@ -115,6 +115,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Survivor Phase 2 paper execution boundary (deterministic risk engine +
     # fictional £20 paper broker). Opt-in; never touches real money.
     "survivor_paper_enabled": False,
+    # Survivor Phase 3 autonomous PAPER loop (market discovery + cycle).
+    "survivor_autonomy_enabled": False,
+    "survivor_dry_run": False,
+    "survivor_market_provider": "polymarket",
     # Deterministic inputs for paper proposals (prices pence, edges bps):
     # {"symbol","market","bid_pence","ask_pence","snapshot_timestamp_utc",
     #  "quantity","expected_probability_bps","market_probability_bps",

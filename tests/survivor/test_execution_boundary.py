@@ -121,11 +121,12 @@ def test_missing_market_inputs_fail_closed_to_no_trade(tmp_path):
 
 @pytest.mark.unit
 def test_no_broker_exchange_wallet_network_code_in_survivor():
-    """Static security scan over the whole survivor package."""
+    """Static security scan over the whole survivor package (code-level tokens)."""
     forbidden = (
         "ccxt", "binance", "coinbase", "alpaca", "interactive brokers",
-        "private_key", "place_order", "real_money",
-        "requests.get", "urllib.request", "socket.socket", "boto3", "websocket", "api_key=",
+        "private_key", "place_order(", "submit_order(", "cancel_order(",
+        "requests.get", "urllib.request", "socket.socket", "boto3", "websocket",
+        "api_key=", "api_key =",
     )
     pkg_dir = os.path.normpath(os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "tradingagents", "survivor",

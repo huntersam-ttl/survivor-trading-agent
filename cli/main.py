@@ -1369,5 +1369,32 @@ def survivor_budget_cmd():
     console.print(f"Global   £{gl_m / 100:.2f} / £{policy.global_monthly_pence / 100:.2f}\n")
 
 
+@app.command(name="survivor-paper-status")
+def survivor_paper_status_cmd():
+    """Read-only Survivor paper-trading status (no deposits, withdrawals, or broker links)."""
+    from tradingagents.survivor.execution.paper_broker import PaperBroker
+    from tradingagents.survivor.risk.limits import risk_limits_from_env
+
+    broker = PaperBroker(limits=risk_limits_from_env())
+    status = broker.status()
+
+    def gbp(pence: int) -> str:
+        return f"£{pence / 100:.2f}"
+
+    console.print("\n[bold cyan]SURVIVOR PAPER[/bold cyan]\n")
+    console.print(f"Mode: {status['mode']}")
+    console.print(f"Starting equity: {gbp(status['starting_equity_pence'])}")
+    console.print(f"Cash: {gbp(status['cash_pence'])}")
+    console.print(f"Exposure: {gbp(status['exposure_pence'])}")
+    console.print(f"Equity: {gbp(status['equity_pence'])}")
+    console.print(f"Realized P/L: {gbp(status['realized_pnl_pence'])}")
+    console.print(f"Unrealized P/L: {gbp(status['unrealized_pnl_pence'])}")
+    console.print(f"High-water mark: {gbp(status['high_water_mark_pence'])}")
+    console.print(f"Drawdown: {status['drawdown_bps'] / 100:.2f}%")
+    console.print(f"Daily P/L: {gbp(status['daily_pnl_pence'])}")
+    console.print(f"Open positions: {status['open_positions']}")
+    console.print(f"Trading state: {status['trading_state']}")
+
+
 if __name__ == "__main__":
     app()

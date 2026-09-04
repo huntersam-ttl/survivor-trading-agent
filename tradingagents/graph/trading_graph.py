@@ -34,6 +34,7 @@ from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
+from tradingagents.survivor.pipeline import execute_final_decision, is_paper_enabled
 from tradingagents.survivor.runtime import is_survivor_enabled
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -623,6 +624,15 @@ class TradingAgentsGraph:
 
         # Clear checkpoint on successful completion to avoid stale state.
         self.clear_checkpoint_on_success(company_name, trade_date, asset_type)
+
+        # Phase 2 execution boundary: deterministic, opt-in paper trading.
+        # When disabled this is a no-op and upstream behavior is unchanged.
+        self.paper_result = None
+        if is_paper_enabled(getattr(self, "config", None) or {}):
+            try:
+                self.paper_result = execute_final_decision(final_state, self.config)
+            except Exception:  # pragma: no cover - fail closed, never crash the run
+                logger.exception("Survivor paper execution failed; no paper trade executed.")
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
 

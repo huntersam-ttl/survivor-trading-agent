@@ -112,6 +112,14 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "checkpoint_enabled": False,
     # Survivor Control Plane (safety, budget manager, role routing)
     "survivor_enabled": False,
+    # Survivor Phase 2 paper execution boundary (deterministic risk engine +
+    # fictional £20 paper broker). Opt-in; never touches real money.
+    "survivor_paper_enabled": False,
+    # Deterministic inputs for paper proposals (prices pence, edges bps):
+    # {"symbol","market","bid_pence","ask_pence","snapshot_timestamp_utc",
+    #  "quantity","expected_probability_bps","market_probability_bps",
+    #  "spread_cost_bps","slippage_bps","fee_bps","uncertainty_penalty_bps"}
+    "survivor_paper_inputs": {},
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",

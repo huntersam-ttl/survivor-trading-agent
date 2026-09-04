@@ -91,6 +91,7 @@ def _e2e_config(**over):
 def test_full_cycle_discovery_to_execution(tmp_path, monkeypatch):
     """20 fake markets -> filters -> top 2 -> fake AI -> A approved/executed, B rejected."""
     monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
+    monkeypatch.delenv("SURVIVOR_DRY_RUN", raising=False)  # hermetic dry-run state
     snapshots = []
     for i in range(18):
         snapshots.append(make_snapshot(

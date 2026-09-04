@@ -184,6 +184,7 @@ class ModelRouter:
         llm_kwargs["max_tokens"] = max_output_tokens
 
         last_error: Exception | None = None
+        attempted_errors: list[str] = []
         attempted_count = 0
 
         for provider, model in candidate_routes:
@@ -277,8 +278,14 @@ class ModelRouter:
                     failure_reason=str(exc),
                 )
                 last_error = InferenceFailedError(f"Inference failed on '{provider}/{model}': {exc}")
+                # Record every attempt so the surfaced error shows the PRIMARY
+                # (preferred-provider) failure, not just the last fallback's.
+                attempted_errors.append(f"{provider}/{model}: {str(exc)[:160]}")
                 # Try fallback route if available
 
         if last_error:
+            if attempted_errors:
+                summary = "; ".join(attempted_errors)
+                last_error = type(last_error)(f"{last_error} | attempted: {summary}")
             raise last_error
         raise SurvivorError("No acceptable healthy provider route found.", status=RouteStatus.NO_PROVIDER)

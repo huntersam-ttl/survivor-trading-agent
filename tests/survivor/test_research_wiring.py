@@ -37,6 +37,7 @@ def _config(**over):
 
 def _cycle(tmp_path, adapter, monkeypatch, research_fn=None, usage_ledger=None, **cfg):
     monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
+    monkeypatch.delenv("SURVIVOR_DRY_RUN", raising=False)  # hermetic dry-run state
     return run_survivor_cycle(
         _config(**cfg),
         adapter=adapter,

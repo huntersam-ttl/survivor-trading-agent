@@ -413,7 +413,8 @@ def test_gods_eye_cannot_execute_trades():
         assert not hasattr(provider, forbidden)
 
 
-def test_jarvis_cannot_approve_experiments(tmp_path):
+def test_jarvis_cannot_approve_experiments(tmp_path, monkeypatch):
+    monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))  # hermetic halt state
     store = ExperimentStore(db_path=str(tmp_path / "learning.db"))
     jarvis = JarvisInterface(store)
     # read-only queries work

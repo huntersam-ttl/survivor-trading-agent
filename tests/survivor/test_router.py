@@ -20,7 +20,11 @@ from tradingagents.survivor.types import (
 
 
 @pytest.fixture
-def test_router():
+def test_router(monkeypatch):
+    # hermetic: default role routes regardless of operator OpenRouter env
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_router.db")
         ledger = InferenceUsageLedger(db_path=db_path)
@@ -44,8 +48,11 @@ def test_router_role_route_resolution(test_router):
 
 
 @pytest.mark.unit
-def test_router_healthy_fallback(test_router):
+def test_router_healthy_fallback(test_router, monkeypatch):
     router = test_router
+    # hermetic: default role routes, no OpenRouter override
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
 
     # Mark DeepSeek as unhealthy (rate limit cooldown)
     router.health_manager.record_failure("deepseek", ProviderErrorCategory.RATE_LIMIT)

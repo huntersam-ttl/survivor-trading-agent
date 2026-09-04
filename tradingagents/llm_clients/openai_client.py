@@ -303,7 +303,17 @@ class OpenAIClient(BaseLLMClient):
             api_key_env = get_api_key_env(self.provider)
             api_key = os.environ.get(api_key_env) if api_key_env else None
             if api_key:
-                llm_kwargs["api_key"] = api_key
+                # langchain_openai 1.x dropped the `api_key` alias — the field
+                # is `openai_api_key`. Passing `api_key` is silently discarded
+                # by pydantic, which produced OpenRouter 401s ("Missing
+                # Authentication header") even with a valid key in the env.
+                llm_kwargs["openai_api_key"] = api_key
+                # Belt-and-braces for the openai>=3.x httpx2 transport, which
+                # may not apply the key as a transport default header.
+                llm_kwargs["default_headers"] = {
+                    **llm_kwargs.get("default_headers", {}),
+                    "Authorization": f"Bearer {api_key}",
+                }
             elif spec.key_optional:
                 llm_kwargs["api_key"] = spec.placeholder_key
             elif api_key_env:

@@ -88,7 +88,7 @@ def test_survivor_llm_invoke_routes_and_settles():
         assert summary["total_calls"] == 1
         entry = summary["breakdown"][0]
         assert entry["role"] == "market_analyst"
-        assert entry["provider"] in ("deepseek", "minimax")
+        assert entry["provider"] in ("deepseek", "minimax", "openrouter")
         # Reservation must be released after settlement
         assert router.budget_manager.get_pending_reserved_pence() == 0
 
@@ -115,7 +115,7 @@ def test_survivor_llm_bind_tools_transform_applied_to_routed_client():
 
         llm.invoke("News scan", mock_client_factory=factory)
         base.bind_tools.assert_called_once_with(["tool_a", "tool_b"])
-        assert captured["provider"] in ("deepseek", "minimax")
+        assert captured["provider"] in ("deepseek", "minimax", "openrouter")
 
 
 @pytest.mark.unit
@@ -146,8 +146,9 @@ def test_run_context_defaults():
 
 
 @pytest.mark.unit
-def test_survivor_disabled_preserves_upstream_graph_path(mock_llm_client):
+def test_survivor_disabled_preserves_upstream_graph_path(mock_llm_client, monkeypatch):
     """survivor_enabled=False must keep the exact upstream wiring: no router, raw LLMs."""
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_ENABLED", raising=False)
     config = {**DEFAULT_CONFIG, "survivor_enabled": False}
     with patch("tradingagents.graph.trading_graph.create_llm_client", mock_llm_client):
         graph = TradingAgentsGraph(config=config)

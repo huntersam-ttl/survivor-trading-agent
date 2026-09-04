@@ -79,6 +79,7 @@ class CycleReport:
     ai_cost_pence: int = 0
     duration_sec: float = 0.0
     candidate_failures: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     details: dict = field(default_factory=dict)
 
     def render(self) -> str:
@@ -276,6 +277,8 @@ def _run_cycle_body(
 
     eval_store = EvaluationStore(db_path=config.get("_evaluation_db_path"))
     version, chash = strategy_identity({"min_edge_bps": limits.min_conservative_net_edge_bps})
+    trial_id = config.get("_trial_id") or "no-trial"
+
 
 
     # 5.-9. Research top candidates, one at a time, with budget preflight
@@ -300,7 +303,7 @@ def _run_cycle_body(
                                        candidate.score, "NO_TRADE", "SKIPPED", "AI_BUDGET_UNAVAILABLE")
                 continue
 
-            run_id = f"{cycle_id}_{snapshot.market_id}"
+            run_id = f"{trial_id}_{cycle_id}_{snapshot.market_id}"
             quote = QuoteSnapshot(
                 symbol=snapshot.market_id,
                 bid_pence=_bps_to_pence(snapshot.bid),
@@ -440,6 +443,26 @@ def _run_cycle_body(
 
 
     report.status = "DRY_RUN" if dry_run_enabled(config) else "ACTIVE"
+
+    # Phase 5: watchdog, heartbeat, AI spend alerts (operations, no self-tuning)
+    from tradingagents.survivor.ops.health import heartbeat_write, watchdog_record
+
+    watchdog_record(state, "consecutive_cycle_failures", success=report.status in ("ACTIVE", "DRY_RUN"))
+    for _failure in report.candidate_failures:
+        watchdog_record(state, "consecutive_market_failures", success=False, halt_threshold=10)
+    heartbeat_write(
+        trial_id=trial_id, pid=os.getpid(),
+        mode="DRY_RUN" if dry_run_enabled(config) else "PAPER",
+        last_cycle_id=cycle_id, last_cycle_status=report.status,
+        halt_state="HALTED" if halt_mod.is_halted() else "CLEAR",
+        heartbeat_path=config.get("_heartbeat_path"),
+    )
+    # AI spend alerts at 50/75/90/100% of daily budget (100% blocks via preflight)
+    from tradingagents.survivor.ops.budget import spend_alerts
+
+    for alert in spend_alerts(usage, survivor_policy):
+        report.warnings.append(alert)
+
 
 
 

@@ -191,3 +191,22 @@ class RuntimeState:
             ).fetchone()
         return dict(row) if row else None
 
+    # --- watchdog kv store ---------------------------------------------------------
+    def _watchdog_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS watchdog (key TEXT PRIMARY KEY, value INTEGER NOT NULL)"
+        )
+
+    def set_watchdog(self, key: str, value: int) -> None:
+        with self._connect() as conn:
+            self._watchdog_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO watchdog (key, value) VALUES (?, ?)", (key, value)
+            )
+
+    def get_watchdog_all(self) -> dict[str, int]:
+        with self._connect() as conn:
+            self._watchdog_table(conn)
+            rows = conn.execute("SELECT key, value FROM watchdog").fetchall()
+        return {r["key"]: int(r["value"]) for r in rows}
+

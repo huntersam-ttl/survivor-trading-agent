@@ -38,3 +38,21 @@ def budget_preflight(
             reason=f"AI_BUDGET_UNAVAILABLE: monthly spend {monthly_spend}p >= limit {policy.global_monthly_pence}p",
         )
     return BudgetPreflight(ok=True, reason="OK")
+
+
+def spend_alerts(
+    usage_ledger: InferenceUsageLedger, policy: SurvivorPolicy
+) -> list[str]:
+    """Deterministic AI spend alerts at 50/75/90/100% of the daily budget.
+    At 100% no further AI calls occur (preflight blocks them). Limits are
+    never auto-increased."""
+    daily = usage_ledger.get_daily_spend_pence(None)
+    limit = policy.global_daily_pence
+    if limit <= 0:
+        return []
+    pct = daily / limit * 100
+    alerts = []
+    for threshold in (50, 75, 90, 100):
+        if pct >= threshold:
+            alerts.append(f"AI_SPEND_{threshold}_PCT: {daily}p / {limit}p daily budget")
+    return alerts

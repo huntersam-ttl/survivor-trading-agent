@@ -1,4 +1,5 @@
 import datetime
+import json
 import os
 import sys
 import time
@@ -1595,6 +1596,164 @@ def survivor_evaluation_status_cmd():
     console.print(f"Prediction records: {len(predictions)}")
     console.print(f"Resolved: {resolved}")
     console.print(f"Trade records: {len(store.trades())}")
+
+
+@app.command(name="survivor-trial-start")
+def survivor_trial_start_cmd(
+    mode: str = typer.Option("DRY_RUN", help="SCAN_ONLY | DRY_RUN | PAPER (PAPER requires explicit env)"),
+    duration_days: int = typer.Option(30, help="Planned trial duration in days."),
+    sample_target: int = typer.Option(300, help="Resolved-prediction completion target."),
+):
+    """Start a long-run PAPER trial after full pre-flight validation."""
+    from tradingagents.survivor.autonomy.halt import is_halted
+    from tradingagents.survivor.ops.health import preflight_check
+    from tradingagents.survivor.ops.trial import TrialManager
+
+    halt_file = os.path.join(os.path.expanduser("~/.tradingagents/survivor"), "HALT")
+    if is_halted(halt_file):
+        console.print("[red]HALT file present; trial start refused.[/red]")
+        raise typer.Exit(code=1)
+    health = preflight_check(cycle_interval_seconds=900)
+    if not health.ok:
+        console.print("[red]Pre-flight failed:[/red]")
+        for failure in health.failures:
+            console.print(f"  - {failure}")
+        raise typer.Exit(code=1)
+    trial = TrialManager().start_trial(mode=mode, planned_duration_days=duration_days,
+                                       resolved_sample_target=sample_target)
+    console.print(f"[green]Trial {trial.trial_id} started[/green] (mode={trial.mode}, "
+                  f"config={trial.config_hash}, duration={trial.planned_duration_days}d, "
+                  f"sample target={trial.resolved_sample_target})")
+
+
+@app.command(name="survivor-trial-status")
+def survivor_trial_status_cmd():
+    """Show recorded trials (read-only)."""
+    from tradingagents.survivor.ops.trial import TrialManager
+
+    trials = TrialManager().all_trials()
+    console.print("\n[bold cyan]SURVIVOR TRIALS[/bold cyan]\n")
+    if not trials:
+        console.print("(no trials recorded)")
+        return
+    for t in trials:
+        console.print(
+            f"{t.trial_id} [{t.status}] mode={t.mode} strategy={t.strategy_version} "
+            f"config={t.config_hash} started={t.start_time_utc} "
+            f"target={t.resolved_sample_target} predictions/{t.planned_duration_days}d"
+        )
+
+
+@app.command(name="survivor-trial-stop")
+def survivor_trial_stop_cmd():
+    """Stop the active trial (preserves all state; deletes nothing)."""
+    from tradingagents.survivor.ops.trial import TrialManager
+
+    manager = TrialManager()
+    trial = manager.active_trial()
+    if trial is None:
+        console.print("[yellow]No active trial.[/yellow]")
+        return
+    manager.stop_trial(trial.trial_id, status="STOPPED")
+    console.print(f"[green]Trial {trial.trial_id} stopped. All records preserved.[/green]")
+
+
+@app.command(name="survivor-trial-report")
+def survivor_trial_report_cmd(
+    fmt: str = typer.Option("text", "--fmt", help="text | json | csv"),
+):
+    """Read-only trial report (P/L, Brier, OOS, gate). Never authorizes live trading."""
+    from tradingagents.survivor.evaluation.evaluate import evaluate_performance
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+    from tradingagents.survivor.ops.trial import TrialManager, trial_completion
+
+    trial = TrialManager().active_trial()
+    store = EvaluationStore()
+    report = evaluate_performance(store)
+    completion = trial_completion(
+        trial, resolved_predictions=report.resolved_predictions,
+        net_pnl_after_ai_cost_pence=report.net_pnl_after_ai_cost_pence,
+        brier_improvement=report.brier_improvement,
+        max_drawdown_bps=report.max_drawdown_bps,
+        profit_concentrated=report.profit_concentration.get("concentrated", False),
+        out_of_sample_net_pnl_pence=report.out_of_sample_net_pnl_pence,
+    ) if trial else {"completed": False, "result": report.gate.value}
+    if fmt == "json":
+        console.print(json.dumps({"performance": report.to_dict(), "trial": completion},
+                                 sort_keys=True, indent=2))
+        return
+    if fmt == "csv":
+        from tradingagents.survivor.evaluation.evaluate import export_csv
+
+        console.print(export_csv(store.trades(strategy_version=report.strategy_version,
+                                              config_hash=report.config_hash)) or "(no trades)")
+        return
+    console.print("\n[bold cyan]SURVIVOR TRIAL REPORT[/bold cyan]\n")
+    console.print(f"Trial ID: {trial.trial_id if trial else '(none)'}")
+    console.print(f"Duration: {completion.get('elapsed_days', 0)} days "
+                  f"(planned {trial.planned_duration_days if trial else '-'})")
+    console.print(f"Resolved predictions: {report.resolved_predictions}")
+    console.print(f"Paper trades: {report.trades}")
+    console.print(f"Paper P/L: £{report.net_pnl_pence / 100:+.2f}")
+    console.print(f"AI cost: £{report.total_ai_cost_pence / 100:+.2f}")
+    console.print(f"Economic P/L: £{report.net_pnl_after_ai_cost_pence / 100:+.2f}")
+    console.print(f"Brier: {report.brier:.3f} (market {report.market_brier:.3f})")
+    console.print(f"OOS net P/L: £{report.out_of_sample_net_pnl_pence / 100:+.2f}")
+    console.print(f"Drawdown: {report.max_drawdown_bps / 100:.2f}%")
+    for warning in report.warnings:
+        console.print(f"WARNING: {warning}")
+    console.print(f"Gate: {report.gate.value} | Trial completed: {completion['completed']}")
+
+
+@app.command(name="survivor-health")
+def survivor_health_cmd():
+    """Read-only health check (databases, ledger chain, halt, watchdog, heartbeat)."""
+    from tradingagents.survivor.autonomy.state import RuntimeState
+    from tradingagents.survivor.ops.health import (
+        heartbeat_age_seconds,
+        preflight_check,
+        watchdog_status,
+    )
+
+    base = os.path.expanduser("~/.tradingagents/survivor")
+    health = preflight_check(survivor_dir=base, cycle_interval_seconds=900)
+    console.print(health.render())
+    try:
+        watchdog = watchdog_status(RuntimeState(db_path=os.path.join(base, "runtime.db")))
+        console.print(f"Consecutive failures: {watchdog}")
+    except Exception:  # noqa: BLE001
+        console.print("Consecutive failures: n/a")
+    try:
+        age = heartbeat_age_seconds()
+        console.print(f"Heartbeat age: {'n/a' if age is None else f'{age:.0f} sec'}")
+    except Exception:  # noqa: BLE001
+        console.print("Heartbeat age: n/a")
+
+
+@app.command(name="survivor-backup")
+def survivor_backup_cmd():
+    """Back up survivor databases + trial config (no secrets)."""
+    from tradingagents.survivor.ops.backup import backup_survivor
+
+    dest = backup_survivor()
+    console.print(f"[green]Backup written to {dest}[/green]")
+
+
+@app.command(name="survivor-backup-verify")
+def survivor_backup_verify_cmd(
+    path: str = typer.Argument(..., help="Path to a backup directory."),
+):
+    """Verify a backup (SQLite integrity + paper hash chain + trials)."""
+    from tradingagents.survivor.ops.backup import verify_backup
+
+    report = verify_backup(path)
+    for name, status in report["files"].items():
+        console.print(f"{name}: {status}")
+    console.print(f"paper chain: {report['paper_chain']}")
+    console.print(f"trials: {report['trials'] or '(none)'}")
+    console.print(f"OK: {report['ok']}")
+    if not report["ok"]:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

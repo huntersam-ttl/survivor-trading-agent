@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -25,6 +26,50 @@ from tradingagents.survivor.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Roles that may use a stronger (more expensive) model when the operator
+# configures one; every other role always uses the cheap model.
+_STRONG_ROLES = frozenset({
+    AgentRole.RESEARCH_MANAGER.value,
+    AgentRole.TRADER.value,
+    AgentRole.PORTFOLIO_MANAGER.value,
+})
+
+
+def _role_routes_from_env() -> dict[str, RoleRoute]:
+    """Build default role routes, optionally overridden by OpenRouter env config.
+
+    Reuses the repository's single existing OpenRouter client path — no second
+    client is implemented here; routing only selects (\"openrouter\", model).
+
+    - ``SURVIVOR_OPENROUTER_MODEL``: exact OpenRouter model ID used for ALL
+      roles (cheap model for quick/analyst/bull/bear; acceptable for a first
+      paper setup to use one model everywhere).
+    - ``SURVIVOR_OPENROUTER_STRONG_MODEL``: optional stronger model for the
+      research manager / trader / portfolio manager roles.
+    - Routing activates only when ``OPENROUTER_API_KEY`` is set.
+
+    The original provider routes are preserved as fallbacks, so the fallback
+    chain never bypasses the configured allowlist. Pricing stays fail-closed:
+    without explicit ``SURVIVOR_OPENROUTER_PRICING`` the model is unpriced and
+    selection fails with ``UnknownPriceError``.
+    """
+    model = os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    if not model or not os.environ.get("OPENROUTER_API_KEY", "").strip():
+        return dict(DEFAULT_ROLE_ROUTES)
+    from tradingagents.llm_clients.pricing import register_openrouter_env_pricing
+
+    register_openrouter_env_pricing()
+    strong = os.environ.get("SURVIVOR_OPENROUTER_STRONG_MODEL", "").strip() or model
+    routes: dict[str, RoleRoute] = {}
+    for role, route in DEFAULT_ROLE_ROUTES.items():
+        chosen = strong if role in _STRONG_ROLES else model
+        routes[role] = RoleRoute(
+            role=role,
+            preferred=[("openrouter", chosen)],
+            fallback=list(route.get_all_routes()),
+        )
+    return routes
 
 
 DEFAULT_ROLE_ROUTES: dict[str, RoleRoute] = {
@@ -109,7 +154,7 @@ class ModelRouter:
         self.policy = policy
         self.budget_manager = budget_manager or BudgetManager(policy)
         self.health_manager = health_manager or ProviderHealthManager()
-        self.role_routes = role_routes if role_routes is not None else dict(DEFAULT_ROLE_ROUTES)
+        self.role_routes = role_routes if role_routes is not None else _role_routes_from_env()
 
     def resolve_routes(self, role: str) -> list[tuple[str, str]]:
         route = self.role_routes.get(role)

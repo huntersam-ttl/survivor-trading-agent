@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from tradingagents.survivor.types import UnknownPriceError
 
@@ -57,6 +58,44 @@ def get_model_price(provider: str, model: str) -> ModelPrice | None:
     """Look up pricing for (provider, model). Case-insensitive match."""
     key = (provider.lower().strip(), model.lower().strip())
     return MODEL_PRICING.get(key)
+
+
+def register_model_price(price: ModelPrice) -> None:
+    """Register explicit pricing into the catalog (e.g. from env configuration).
+
+    Never derived from the model name — only from explicit configuration.
+    """
+    MODEL_PRICING[(price.provider.lower().strip(), price.model.lower().strip())] = price
+
+
+def register_openrouter_env_pricing() -> None:
+    """Register explicit pricing for the configured OpenRouter model, if provided.
+
+    ``SURVIVOR_OPENROUTER_PRICING="<input_usd_per_1m>,<output_usd_per_1m>"``
+    (e.g. ``"0.14,0.28"``). Without it the model stays UNPRICED and routing
+    fails closed with ``UnknownPriceError`` — price is never assumed from the
+    model name. A malformed value raises (fail loudly, never guess).
+    """
+    raw = os.environ.get("SURVIVOR_OPENROUTER_PRICING", "").strip()
+    model = os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    if not raw or not model:
+        return
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 2:
+        raise ValueError(
+            "Invalid SURVIVOR_OPENROUTER_PRICING: expected '<input_usd_per_1m>,"
+            f"<output_usd_per_1m>', got {raw!r}"
+        )
+    try:
+        in_price = Decimal(parts[0])
+        out_price = Decimal(parts[1])
+    except InvalidOperation as exc:
+        raise ValueError(f"Invalid SURVIVOR_OPENROUTER_PRICING: {raw!r}") from exc
+    if in_price <= 0 or out_price <= 0:
+        raise ValueError(
+            f"SURVIVOR_OPENROUTER_PRICING values must be positive, got {raw!r}"
+        )
+    register_model_price(ModelPrice("openrouter", model, in_price, out_price))
 
 
 @dataclass(frozen=True)

@@ -1349,11 +1349,13 @@ def survivor_budget_cmd():
     op_d = ledger.get_daily_spend_pence("openai")
     ds_d = ledger.get_daily_spend_pence("deepseek")
     mm_d = ledger.get_daily_spend_pence("minimax")
+    or_d = ledger.get_daily_spend_pence("openrouter")
     gl_d = ledger.get_daily_spend_pence(None)
 
     op_m = ledger.get_monthly_spend_pence("openai")
     ds_m = ledger.get_monthly_spend_pence("deepseek")
     mm_m = ledger.get_monthly_spend_pence("minimax")
+    or_m = ledger.get_monthly_spend_pence("openrouter")
     gl_m = ledger.get_monthly_spend_pence(None)
 
     console.print("\n[bold cyan]SURVIVOR AI BUDGET[/bold cyan]\n")
@@ -1361,12 +1363,14 @@ def survivor_budget_cmd():
     console.print(f"OpenAI   £{op_d / 100:.2f} / £{policy.openai_daily_pence / 100:.2f}")
     console.print(f"DeepSeek £{ds_d / 100:.2f} / £{policy.deepseek_daily_pence / 100:.2f}")
     console.print(f"MiniMax  £{mm_d / 100:.2f} / £{policy.minimax_daily_pence / 100:.2f}")
+    console.print(f"OpenRtr  £{or_d / 100:.2f} / £{policy.get_provider_daily_budget('openrouter') / 100:.2f}")
     console.print(f"Global   £{gl_d / 100:.2f} / £{policy.global_daily_pence / 100:.2f}\n")
 
     console.print("[bold]Month:[/bold]")
     console.print(f"OpenAI   £{op_m / 100:.2f} / £{policy.openai_monthly_pence / 100:.2f}")
     console.print(f"DeepSeek £{ds_m / 100:.2f} / £{policy.deepseek_monthly_pence / 100:.2f}")
     console.print(f"MiniMax  £{mm_m / 100:.2f} / £{policy.minimax_monthly_pence / 100:.2f}")
+    console.print(f"OpenRtr  £{or_m / 100:.2f} / £{policy.get_provider_monthly_budget('openrouter') / 100:.2f}")
     console.print(f"Global   £{gl_m / 100:.2f} / £{policy.global_monthly_pence / 100:.2f}\n")
 
 

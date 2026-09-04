@@ -245,6 +245,16 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
     if usage is not None:
         research_config["survivor_usage_ledger_path"] = str(usage.db_path)
 
+    # Central OpenRouter operation (optional): when the operator configures an
+    # OpenRouter key + model, the graph's construction clients use the existing
+    # OpenRouter provider path too, so ONE key runs the whole research run.
+    or_model = os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    if or_model and os.environ.get("OPENROUTER_API_KEY", "").strip():
+        or_strong = os.environ.get("SURVIVOR_OPENROUTER_STRONG_MODEL", "").strip() or or_model
+        research_config["llm_provider"] = "openrouter"
+        research_config["deep_think_llm"] = or_strong
+        research_config["quick_think_llm"] = or_model
+
     try:
         graph = TradingAgentsGraph(config=research_config)
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")

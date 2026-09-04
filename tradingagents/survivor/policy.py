@@ -85,6 +85,10 @@ class SurvivorPolicy:
             return self.deepseek_monthly_pence
         if p in ("minimax", "minimax-cn"):
             return self.minimax_monthly_pence
+        if p == "openrouter":
+            # OpenRouter spend is mapped onto the EXISTING global ceiling —
+            # no separate (or larger) budget is created automatically.
+            return self.global_monthly_pence
         # Default fallback to provider allowance or global
         return self.global_monthly_pence
 
@@ -96,6 +100,9 @@ class SurvivorPolicy:
             return self.deepseek_daily_pence
         if p in ("minimax", "minimax-cn"):
             return self.minimax_daily_pence
+        if p == "openrouter":
+            # Mapped onto the existing global daily ceiling (no increase).
+            return self.global_daily_pence
         return self.global_daily_pence
 
     def get_role_max_tokens(self, role: str) -> int:

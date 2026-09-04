@@ -1497,6 +1497,118 @@ def survivor_scan_cmd():
         )
 
 
+@app.command(name="survivor-experiments")
+def survivor_experiments_cmd():
+    """List learning-engine experiment proposals (read-only)."""
+    from tradingagents.survivor.learning.registry import ExperimentStore
+
+    experiments = ExperimentStore().experiments()
+    if not experiments:
+        console.print("(no experiments proposed yet)")
+        return
+    for experiment in experiments:
+        console.print(
+            f"{experiment.experiment_id} [{experiment.status.value}] "
+            f"(parent {experiment.parent_strategy_version}, n={experiment.sample_size})"
+        )
+        console.print(f"  {experiment.hypothesis}")
+
+
+@app.command(name="survivor-experiment-show")
+def survivor_experiment_show_cmd(experiment_id: str):
+    """Show one experiment in full detail (read-only)."""
+    import json as _json
+
+    from tradingagents.survivor.learning.registry import ExperimentStore
+
+    experiment = ExperimentStore().get_experiment(experiment_id)
+    if experiment is None:
+        console.print(f"[red]Unknown experiment: {experiment_id}[/red]")
+        raise typer.Exit(code=1)
+    console.print(_json.dumps(experiment.to_dict(), sort_keys=True, indent=2))
+
+
+@app.command(name="survivor-experiment-approve")
+def survivor_experiment_approve_cmd(
+    experiment_id: str,
+    operator: str = typer.Option(..., "--operator", help="Who is approving (required)."),
+):
+    """MANUALLY approve a CANDIDATE_FOR_PROMOTION experiment as a new
+    strategy version. Never runs automatically; never touches a live trial."""
+    from datetime import datetime, timezone
+
+    from tradingagents.survivor.learning.registry import ExperimentStore
+
+    try:
+        version = ExperimentStore().approve_experiment(
+            experiment_id, operator,
+            datetime.now(timezone.utc).isoformat())
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]Approval refused: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Approved. New strategy version: {version} (parent preserved)")
+
+
+@app.command(name="survivor-strategy-history")
+def survivor_strategy_history_cmd():
+    """Show the append-only strategy version history (read-only)."""
+    from tradingagents.survivor.learning.registry import ExperimentStore
+
+    history = ExperimentStore().history()
+    if not history:
+        console.print("Current strategy: survivor-v1.0 (no manual promotions yet)")
+        return
+    for row in history:
+        console.print(
+            f"{row['version']} (parent {row['parent_version']}, "
+            f"hash {row['config_hash']}, {row['note']})"
+        )
+
+
+@app.command(name="survivor-strategy-rollback")
+def survivor_strategy_rollback_cmd(
+    version: str,
+    operator: str = typer.Option(..., "--operator", help="Who is rolling back (required)."),
+):
+    """MANUALLY roll back by creating a NEW strategy version from a past one.
+    History is never rewritten."""
+    from datetime import datetime, timezone
+
+    from tradingagents.survivor.learning.registry import ExperimentStore
+
+    try:
+        new_version = ExperimentStore().rollback(
+            version, operator, datetime.now(timezone.utc).isoformat())
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]Rollback refused: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    console.print(f"Rolled back. New current version: {new_version}")
+
+
+@app.command(name="survivor-learning-report")
+def survivor_learning_report_cmd():
+    """Generate the SURVIVOR LEARNING REPORT (read-only, no changes applied)."""
+    from datetime import datetime, timezone
+
+    from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
+    from tradingagents.survivor.evaluation.store import EvaluationStore
+    from tradingagents.survivor.learning.dataset import build_learning_records
+    from tradingagents.survivor.learning.registry import ExperimentStore
+    from tradingagents.survivor.learning.report import (
+        generate_learning_report,
+        render_learning_report,
+    )
+
+    store = EvaluationStore()
+    usage = InferenceUsageLedger() if os.path.exists(
+        os.path.expanduser("~/.tradingagents/survivor/usage.db")) else None
+    records = build_learning_records(store, usage_ledger=usage)
+    version, _ = ExperimentStore().current_version()
+    report = generate_learning_report(records, current_version=version,
+                                      created_at=datetime.now(timezone.utc).isoformat())
+    console.print(render_learning_report(report))
+
+
 @app.command(name="survivor-run-once")
 def survivor_run_once_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Scan + research + risk, but NO paper execution."),

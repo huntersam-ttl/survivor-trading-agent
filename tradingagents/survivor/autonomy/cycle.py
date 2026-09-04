@@ -130,6 +130,37 @@ def _int_env(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _record_shadow_decisions(config: dict, cycle_id: str, snapshot, result, current) -> None:
+    """Phase 6 shadow mode: for experiments in SHADOW_TESTING, record a
+    FICTIONAL parallel decision. Best-effort; never touches PaperBroker and
+    never breaks the paper cycle."""
+    try:
+        from tradingagents.survivor.learning.experiments import ExperimentStatus
+        from tradingagents.survivor.learning.registry import ExperimentStore
+        from tradingagents.survivor.learning.shadow import ShadowStore, shadow_decision_for
+
+        experiment_store = ExperimentStore(config.get("_learning_db_path"))
+        shadow_experiments = experiment_store.experiments(
+            status=ExperimentStatus.SHADOW_TESTING)
+        if not shadow_experiments:
+            return
+        shadow = ShadowStore(config.get("_shadow_db_path"))
+        for experiment in shadow_experiments:
+            edge = (result.expected_probability_bps or 0) \
+                - (snapshot.market_probability_bps or 0) \
+                - result.spread_cost_bps - result.slippage_bps \
+                - result.fee_bps - result.uncertainty_penalty_bps
+            shadow.record(shadow_decision_for(
+                experiment, cycle_id=cycle_id, market_id=snapshot.market_id,
+                timestamp_utc=current.isoformat(),
+                survivor_probability=(result.expected_probability_bps or 0) / 10000,
+                market_probability=(snapshot.market_probability_bps or 0) / 10000,
+                conservative_edge_bps=edge,
+            ))
+    except Exception:  # noqa: BLE001 - shadow must never break the paper cycle
+        pass
+
+
 _P_YES_RE = re.compile(r"P\s*\(\s*YES\s*\)\s*[:=]\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
 
 # API-key environment variables for the providers referenced by the ModelRouter
@@ -474,6 +505,7 @@ def _run_cycle_body(
             report.ai_researched += 1
             report.ai_cost_pence += result.ai_cost_pence
             state.record_research(cycle_id, snapshot.market_id, run_id, "OK")
+            _record_shadow_decisions(config, cycle_id, snapshot, result, current)
             eval_store.record_prediction(PredictionRecord(
                 cycle_id=cycle_id, run_id=run_id, proposal_id=f"{run_id}_prop",
                 market_id=snapshot.market_id, timestamp_utc=current.isoformat(),

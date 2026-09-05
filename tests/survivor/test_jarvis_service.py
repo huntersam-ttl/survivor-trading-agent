@@ -233,3 +233,128 @@ def test_risk_budget_mutation_absent(harness):
     assert after == before
     # no live-trading or budget-mutation handler was wired at all
     assert "run_live" not in inject.__dict__ and "set_budget" not in inject.__dict__
+
+
+def test_signals_valid_and_bounded(harness):
+    from tradingagents.survivor.markets.signals import MAX_CANDIDATES
+
+    start, request, *_ = harness
+    server = start()
+
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 200
+    assert set(body) >= {"generated_at", "market_open", "candidates"}
+    assert body["market_open"] is True
+    assert isinstance(body["candidates"], list)
+    assert len(body["candidates"]) == 1
+    row = body["candidates"][0]
+    for key in ("symbol", "score", "price_change", "volume_signal",
+                "volatility_signal", "reason_codes", "observed_at"):
+        assert key in row, key
+    assert row["symbol"] == "mkt-1"
+    assert row["price_change"] is None
+    assert isinstance(row["reason_codes"], list)
+    assert len(body["candidates"]) <= MAX_CANDIDATES
+
+
+def test_signals_empty_market(harness):
+    start, request, inject, *_ = harness
+    inject.adapter = FakeMarketAdapter([])
+    server = start()
+
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 200
+    assert body["market_open"] is False
+    assert body["candidates"] == []
+
+
+def test_signals_malformed_result_fails_safely(harness):
+    class RaisingAdapter:
+        provider = "bad"
+        market_type = "prediction_binary"
+
+        def list_markets(self, limit=100):
+            raise RuntimeError("provider exploded")
+
+    start, request, inject, *_ = harness
+    inject.adapter = RaisingAdapter()
+    server = start()
+
+    # the service must not crash the worker; it returns a clean 500 INTERNAL
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 500
+    assert body["error"]["code"] == "INTERNAL"
+    # and the rest of the service still works
+    status, health = request(server, "GET", "/v1/health")
+    assert status == 200 and health["status"] == "ok"
+
+
+def test_signals_auth_required(harness):
+    start, request, *_ = harness
+    server = start()
+
+    status, body = request(server, "GET", "/v1/signals", token=None)
+    assert status == 401
+    status, body = request(server, "GET", "/v1/signals", token="wrong-token")
+    assert status == 401
+
+
+def test_signals_max_20_bound(harness):
+    from tradingagents.survivor.markets.signals import MAX_CANDIDATES
+
+    start, request, inject, *_ = harness
+    snapshots = [make_snapshot(f"mkt-{i}") for i in range(MAX_CANDIDATES + 5)]
+    inject.adapter = FakeMarketAdapter(snapshots)
+    server = start()
+
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 200
+    assert len(body["candidates"]) == MAX_CANDIDATES
+
+
+def test_signals_zero_model_and_research_calls(harness, tmp_path):
+    from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
+    from tradingagents.survivor.markets.signals import MAX_CANDIDATES
+
+    start, request, inject, adapter, research_calls = harness
+    # give enough candidates so the scan does real ranking work
+    inject.adapter = FakeMarketAdapter(
+        [make_snapshot(f"mkt-{i}") for i in range(3)]
+    )
+    usage = InferenceUsageLedger(db_path=str(tmp_path / "usage-signals.db"))
+    inject.usage_ledger = usage
+    server = start()
+
+    before_r = research_calls["n"]
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 200
+    # no research-agent calls, no LLM spend recorded
+    assert research_calls["n"] == before_r
+    assert usage.get_daily_spend_pence(None) == 0
+    assert len(body["candidates"]) <= MAX_CANDIDATES
+
+
+def test_signals_cannot_execute_trades(harness, tmp_path):
+    from tradingagents.survivor.execution.ledger import PaperLedger
+    from tradingagents.survivor.execution.paper_broker import PaperBroker
+    from tradingagents.survivor.risk.limits import RiskLimits
+
+    start, request, inject, *_ = harness
+    paper_path = str(tmp_path / "signals-paper.db")
+    broker = PaperBroker(
+        limits=RiskLimits(),
+        ledger=PaperLedger(db_path=paper_path),
+    )
+    inject.broker = broker
+    server = start()
+
+    status, body = request(server, "GET", "/v1/signals")
+    assert status == 200
+    # no BUY/SELL recommendation is exposed in the payload
+    assert not any("BUY" in str(b) or "SELL" in str(b) for b in body["candidates"])
+    # GET only; a POST to the same path is not a valid route -> 404
+    status, _ = request(server, "POST", "/v1/signals")
+    assert status == 404
+    # the paper broker executed nothing
+    assert broker.portfolio.positions == {}
+    assert broker.ledger.events() == []

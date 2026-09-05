@@ -196,6 +196,29 @@ class SurvivorHandlers:
             )
         return {"positions": rows}
 
+    def signals(self) -> dict:
+        from tradingagents.survivor.markets.filters import scan_limits_from_env
+        from tradingagents.survivor.markets.ranking import ranking_weights_from_env
+        from tradingagents.survivor.markets.scanner import MarketScanner
+        from tradingagents.survivor.markets.signals import (
+            MAX_CANDIDATES,
+            build_signal_summary,
+        )
+
+        inj = self.inject
+        adapter = inj.adapter
+        if adapter is None:
+            from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
+
+            adapter = PolymarketAdapter()
+        scanner = MarketScanner(
+            adapter,
+            limits=scan_limits_from_env(),
+            weights=ranking_weights_from_env(),
+            max_candidates_per_cycle=MAX_CANDIDATES,
+        )
+        return build_signal_summary(scanner.scan())
+
     def run_dry(self) -> dict:
         from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
 
@@ -238,6 +261,7 @@ class JarvisApp:
         ("GET", "/v1/budget"): "budget",
         ("GET", "/v1/performance"): "performance",
         ("GET", "/v1/positions"): "positions",
+        ("GET", "/v1/signals"): "signals",
         ("POST", "/v1/run/dry"): "run_dry",
         ("POST", "/v1/run/paper"): "run_paper",
         ("POST", "/v1/halt"): "halt",

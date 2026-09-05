@@ -34,6 +34,9 @@ from tradingagents.survivor.policy import SurvivorPolicy
 
 DAY = "2026-09-04"
 FIXED_NOW = _dt.datetime(2026, 9, 4, 12, 0, tzinfo=_dt.timezone.utc)
+# Daily-spend tests must record against the CURRENT UTC date so the daily
+# bucket matches `get_daily_spend_pence(None)` on any run date.
+TODAY = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 def _ledger(db_path) -> InferenceUsageLedger:
@@ -53,7 +56,7 @@ def _record(ledger, pence: int, provider="openai", model="gpt-test", role="trade
         native_cost_minor=1,
         native_currency="USD",
         gbp_cost_pence=pence,
-        timestamp_utc=f"{DAY}T10:00:00Z",
+        timestamp_utc=f"{TODAY}T10:00:00Z",
     )
 
 

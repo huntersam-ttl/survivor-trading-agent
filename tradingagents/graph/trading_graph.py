@@ -458,8 +458,12 @@ class TradingAgentsGraph:
         """
         self.ticker = company_name
 
-        # Resolve any pending memory-log entries for this ticker before the pipeline runs.
-        self._resolve_pending_entries(company_name)
+        # Resolve any pending memory-log entries for this ticker before the
+        # pipeline runs — EXCEPT for prediction markets: their identifiers are
+        # opaque internal ids with no ticker history, so resolving pending
+        # entries would trigger a pointless stock-returns (yfinance) lookup.
+        if asset_type != "prediction_market":
+            self._resolve_pending_entries(company_name)
 
         with self.checkpoint_scope(company_name, trade_date, asset_type) as thread_id_value:
             return self._run_graph(

@@ -9,6 +9,7 @@ System-level corruption (ledger/accounting) halts the entire runtime.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -163,6 +164,18 @@ def _record_shadow_decisions(config: dict, cycle_id: str, snapshot, result, curr
 
 _P_YES_RE = re.compile(r"P\s*\(\s*YES\s*\)\s*[:=]\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
 
+
+def _prediction_market_internal_id(market_id: str) -> str:
+    """Deterministic opaque internal identifier for a prediction market.
+
+    ``pm_<12 hex chars>`` derived from the market_id (<= 16 chars total, well
+    within the graph's 32-char identifier limit). It is NOT a stock ticker and
+    must never trigger market-data fetching; the full question and decision-
+    time snapshot reach the agents through ``survivor_instrument_context``.
+    """
+    digest = hashlib.sha256((market_id or "").encode()).hexdigest()[:12]
+    return f"pm_{digest}"
+
 # API-key environment variables for the providers referenced by the ModelRouter
 # role routes (deterministic preflight — never an LLM call).
 _PROVIDER_KEY_ENV = {
@@ -186,6 +199,7 @@ def _market_evidence_context(candidate: Candidate, quote: QuoteSnapshot) -> str:
     question_block = build_evidence("market_question", snap.question).render()
     header = "\n".join([
         "INSTRUMENT: binary prediction market (paper-only trial; identifier only, not a stock ticker).",
+        f"internal_instrument_id: {_prediction_market_internal_id(snap.market_id)}",
         f"market_id: {snap.market_id}",
         f"provider: {snap.provider}",
         f"symbol_or_slug: {snap.symbol_or_slug}",
@@ -241,7 +255,11 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
     """
     config = config or {}
     snapshot = candidate.snapshot
-    symbol = snapshot.symbol_or_slug or snapshot.market_id
+    # Opaque short internal identifier derived deterministically from the
+    # market_id. The Polymarket slug/question is NOT a ticker and must never
+    # reach ticker-shaped fields (e.g. the graph's 32-char ticker validation,
+    # filesystem paths, or memory-log ticker keys).
+    symbol = _prediction_market_internal_id(snapshot.market_id)
 
     try:
         from tradingagents.default_config import DEFAULT_CONFIG

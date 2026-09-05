@@ -6,6 +6,7 @@ TradingAgentsGraph is faked at the class boundary; everything else is the real
 deterministic cycle code.
 """
 
+import datetime as _dt
 import sqlite3
 
 import pytest
@@ -16,6 +17,7 @@ from tradingagents.survivor.autonomy import cycle as cycle_mod, halt as halt_mod
 from tradingagents.survivor.autonomy.cycle import (
     ResearchResult,
     _default_research,
+    _prediction_market_internal_id,
     run_survivor_cycle,
 )
 from tradingagents.survivor.autonomy.state import RuntimeState
@@ -109,13 +111,14 @@ class _FakeGraph:
     def propagate(self, company_name, trade_date, asset_type="stock"):
         _FakeGraph.calls.append((company_name, trade_date, asset_type))
         ledger = InferenceUsageLedger(db_path=self.config["survivor_usage_ledger_path"])
+        today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
         ledger.record_inference(
             run_id=self.config["survivor_run_id"],
             agent_role="quick_analyst", provider="deepseek", model="deepseek-chat",
             ticker_or_market=company_name,
             input_tokens=100, output_tokens=10, reasoning_tokens=0,
             native_cost_minor=1, native_currency="USD", gbp_cost_pence=2,
-            timestamp_utc="2026-09-04T10:00:00Z",
+            timestamp_utc=f"{today}T10:00:00Z",
         )
         return (
             {"final_trade_decision": "**Rating**: Buy\n\n**Executive Summary**: go\n"
@@ -160,7 +163,7 @@ def test_default_research_invokes_tradingagents_graph_and_usage_ledger(tmp_path,
     assert "UNTRUSTED DATA" in context                   # injection-safe wrapper
     assert "MUST NOT replace" in context                 # point-in-time rule
     # identifier passed to propagate is the market id, never a fake stock ticker
-    assert _FakeGraph.calls[0][0] == "mkt-poly"
+    assert _FakeGraph.calls[0][0] == _prediction_market_internal_id("mkt-poly")
     assert _FakeGraph.calls[0][2] == "prediction_market"
 
     # 4. the inference usage ledger actually received a record for this run
@@ -246,11 +249,12 @@ def test_default_research_classifies_provider_errors(tmp_path, monkeypatch):
 def test_budget_unavailable_still_skips_before_research(tmp_path, monkeypatch):
     adapter = FakeMarketAdapter([make_snapshot("mkt-0"), make_snapshot("mkt-1")])
     usage = InferenceUsageLedger(db_path=str(tmp_path / "usage.db"))
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
     usage.record_inference(
         run_id="pre", agent_role="trader", provider="deepseek", model="deepseek-chat",
         ticker_or_market="m", input_tokens=1, output_tokens=1, reasoning_tokens=0,
         native_cost_minor=1, native_currency="USD", gbp_cost_pence=170,
-        timestamp_utc="2026-09-04T10:00:00Z",
+        timestamp_utc=f"{today}T10:00:00Z",
     )
     calls = {"n": 0}
 

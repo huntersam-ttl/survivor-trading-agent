@@ -10,6 +10,7 @@ System-level corruption (ledger/accounting) halts the entire runtime.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import time
@@ -36,6 +37,13 @@ from tradingagents.survivor.policy import SurvivorPolicy
 from tradingagents.survivor.risk.engine import RiskEngine
 from tradingagents.survivor.risk.limits import risk_limits_from_env
 from tradingagents.survivor.trading.proposal import ProposalBuilder, RiskInputs
+from tradingagents.survivor.intelligence import (
+    JarvisIntelligenceClient,
+    remember_digest_fingerprint,
+    research_state_hash,
+)
+
+logger = logging.getLogger(__name__)
 
 BOOL_TRUE = ("true", "1", "yes", "on")
 
@@ -258,6 +266,46 @@ def _classify_inference_error(exc: Exception) -> str:
     return f"INFERENCE_FAILED: {msg}"
 
 
+def _jarvis_enabled(config: dict | None = None) -> bool:
+    override = (config or {}).get("jarvis_intelligence_enabled")
+    if override is not None:
+        return str(override).strip().lower() in BOOL_TRUE
+    return os.environ.get("JARVIS_INTELLIGENCE_ENABLED", "true").strip().lower() in BOOL_TRUE
+
+
+def _acquire_jarvis_intel(symbols, config: dict, now: datetime):
+    """Best-effort Jarvis World Intelligence digest fetch. Fail-open.
+
+    Returns ``(digest | None, metrics)`` and never raises, so any Jarvis
+    problem (offline / disabled / unconfigured / timeout / malformed / 401-403)
+    leaves the existing SURVIVOR flow completely unchanged. Metrics record only
+    the agreed observability signals — never API keys or full prompts.
+    """
+    metrics = {
+        "enabled": _jarvis_enabled(config),
+        "reachable": False,
+        "analyses_received": 0,
+        "digest_age_sec": None,
+        "cache_hit": False,
+    }
+    if not metrics["enabled"]:
+        return None, metrics
+    try:
+        client = JarvisIntelligenceClient()
+        digest = client.get_digest(symbols, since=None, min_significance=None, limit=None)
+    except Exception:  # noqa: BLE001 - Jarvis must never break or narrow the paper cycle
+        logger.warning("Jarvis digest fetch failed benignly; continuing without digest")
+        return None, metrics
+    if digest is None:
+        return None, metrics
+    metrics["enabled"] = True
+    metrics["reachable"] = True
+    metrics["analyses_received"] = len(digest.analyses)
+    metrics["digest_age_sec"] = digest.age_seconds(now)
+    metrics["cache_hit"] = remember_digest_fingerprint(digest.fingerprint)
+    return digest, metrics
+
+
 def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, run_id: str) -> ResearchResult:
     """Default research: run the existing TradingAgents multi-agent pipeline
     (analysts -> bull/bear -> research manager -> trader -> risk -> PM) under
@@ -282,6 +330,16 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
     except ImportError as exc:
         return _research_failure(f"RESEARCH_BACKEND_UNAVAILABLE: {exc}", run_id)
 
+    research_context = _market_evidence_context(candidate, quote)
+    # Optional Jarvis intelligence: fold the bounded, compact digest into the
+    # existing research context only. When absent (or on any failure) this is a
+    # no-op and the exact prior context is preserved.
+    jarvis_digest = (config or {}).get("_jarvis_digest")
+    if jarvis_digest is not None:
+        digest_block = jarvis_digest.compact_context()
+        if digest_block:
+            research_context = f"{research_context}\n\n{digest_block}"
+
     research_config = {
         **DEFAULT_CONFIG,
         **config,
@@ -292,7 +350,7 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         # RiskEngine + PaperBroker (and dry-run stops before execute).
         "survivor_paper_enabled": False,
         "survivor_run_id": run_id,
-        "survivor_instrument_context": _market_evidence_context(candidate, quote),
+        "survivor_instrument_context": research_context,
         "survivor_paper_inputs": {
             **(config or {}).get("survivor_paper_inputs", {}),
             "symbol": snapshot.market_id,
@@ -486,7 +544,14 @@ def _run_cycle_body(
     version, chash = strategy_identity({"min_edge_bps": limits.min_conservative_net_edge_bps})
     trial_id = config.get("_trial_id") or "no-trial"
 
-
+    # Jarvis World Intelligence (optional, fail-open): fetch ONE bounded digest
+    # before the research/decision cycle. Any failure yields None and the
+    # existing flow runs unchanged. Only compact fields ever leave this module.
+    jarvis_digest, jarvis_metrics = _acquire_jarvis_intel(
+        [c.market_id for c in scan.top], config, current)
+    config["_jarvis_digest"] = jarvis_digest
+    config["_jarvis_digest_fingerprint"] = jarvis_digest.fingerprint if jarvis_digest else None
+    report.details["jarvis"] = jarvis_metrics
 
     # 5.-9. Research top candidates, one at a time, with budget preflight
     for candidate in scan.top:
@@ -522,9 +587,14 @@ def _run_cycle_body(
                 timestamp_utc=snapshot.source_timestamp_utc or snapshot.timestamp_utc,
             )
             # Duplicate-analysis suppression: a materially identical decision-
-            # time snapshot analyzed within the cooldown window reuses the
-            # cached verdict — ZERO model calls for unchanged state.
-            data_hash = snapshot_data_hash(snapshot)
+            # time snapshot AND digest analyzed within the cooldown window reuses
+            # the cached verdict — ZERO model calls for unchanged state. The
+            # Jarvis fingerprint is folded in so unchanged intelligence never
+            # triggers an extra LLM call.
+            data_hash = research_state_hash(
+                snapshot_data_hash(snapshot),
+                config.get("_jarvis_digest_fingerprint"),
+            )
             cooldown_hours = float(os.environ.get("SURVIVOR_RESEARCH_COOLDOWN_HOURS", "24"))
             cutoff = current - timedelta(hours=cooldown_hours)
             already_analyzed = any(
@@ -569,7 +639,7 @@ def _run_cycle_body(
                 - result.spread_cost_bps - result.slippage_bps - result.fee_bps
                 - result.uncertainty_penalty_bps,
                 ai_cost_pence=result.ai_cost_pence,
-                snapshot_data_hash=snapshot_data_hash(snapshot),
+                snapshot_data_hash=data_hash,
             ))
             eval_store.record_cost_attribution(run_id, snapshot.market_id, cycle_id,
                                                result.ai_cost_pence)

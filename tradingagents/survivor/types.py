@@ -91,6 +91,24 @@ class InferenceFailedError(SurvivorError):
         super().__init__(message, status=RouteStatus.INFERENCE_FAILED)
 
 
+class GovernorExhaustedError(SurvivorError):
+    """Raised by the global LLM cost governor when a hard limit is hit
+    (token cap, call rate, daily USD budget). Fail-safe: no retry."""
+
+    def __init__(self, message: str, is_daily: bool = False):
+        status = RouteStatus.DAILY_BUDGET_EXHAUSTED if is_daily else RouteStatus.BUDGET_EXHAUSTED
+        super().__init__(message, status=status)
+        self.is_daily = is_daily
+
+
+class AutonomyLLMDisabledError(SurvivorError):
+    """Raised when autonomous/background LLM calls are disabled by the
+    global kill switch (LLM_AUTONOMY_ENABLED=false)."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status=RouteStatus.NO_PROVIDER)
+
+
 @dataclass(frozen=True)
 class RoleRoute:
     """Configured route choices for an agent role."""

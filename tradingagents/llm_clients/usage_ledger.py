@@ -149,6 +149,30 @@ class InferenceUsageLedger:
             row = conn.execute(query, params).fetchone()
             return row["total"] or 0 if row else 0
 
+    def get_native_spend_today(self, provider: str | None = None, date_str: str | None = None) -> float:
+        """Sum today's SETTLED spend for a provider in its NATIVE major units
+        (USD for OpenRouter et al.). Used by the cost governor's USD budget.
+        FAILED rows settle 0 cost and are excluded."""
+        cur_date = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        p_filter = provider.lower() if provider else None
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT provider, native_cost_minor, native_currency
+                FROM usage_records
+                WHERE substr(timestamp_utc, 1, 10) = ?
+                  AND status = 'SUCCESS'
+                """,
+                (cur_date,),
+            ).fetchall()
+        total = 0.0
+        for row in rows:
+            if p_filter and row["provider"].lower() != p_filter:
+                continue
+            if row["native_currency"].upper() == "USD":
+                total += row["native_cost_minor"] / 100.0
+        return total
+
     def get_monthly_spend_pence(self, provider: str | None = None, year_month: str | None = None) -> int:
         """Sum gbp_cost_pence for a specific UTC month (format YYYY-MM)."""
         target_month = year_month or datetime.now(timezone.utc).strftime("%Y-%m")

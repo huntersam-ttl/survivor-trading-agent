@@ -16,7 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
@@ -131,6 +131,17 @@ def _int_env(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _parse_iso(ts: str):
+    """Parse an ISO-8601 UTC timestamp into a tz-aware datetime (best-effort)."""
+    try:
+        parsed = datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except (ValueError, TypeError):
+        return None
+
+
 def _record_shadow_decisions(config: dict, cycle_id: str, snapshot, result, current) -> None:
     """Phase 6 shadow mode: for experiments in SHADOW_TESTING, record a
     FICTIONAL parallel decision. Best-effort; never touches PaperBroker and
@@ -235,6 +246,10 @@ def _classify_inference_error(exc: Exception) -> str:
     low = msg.lower()
     if name == "BudgetExhaustedError" or "budget" in low and "exhaust" in low:
         return f"AI_BUDGET_UNAVAILABLE: {msg}"
+    if name in ("GovernorExhaustedError",):
+        return f"COST_GOVERNOR: {msg}"
+    if name in ("AutonomyLLMDisabledError",):
+        return f"LLM_AUTONOMY_DISABLED: {msg}"
     if name in ("ModelNotAllowedError", "UnknownPriceError", "UnhealthyProviderError", "NoRouteError") \
             or "no model route" in low or "not allowed" in low or "unpriced" in low:
         return f"NO_MODEL_ROUTE: {msg}"
@@ -506,6 +521,24 @@ def _run_cycle_body(
                 ask_pence=_bps_to_pence(snapshot.ask),
                 timestamp_utc=snapshot.source_timestamp_utc or snapshot.timestamp_utc,
             )
+            # Duplicate-analysis suppression: a materially identical decision-
+            # time snapshot analyzed within the cooldown window reuses the
+            # cached verdict — ZERO model calls for unchanged state.
+            data_hash = snapshot_data_hash(snapshot)
+            cooldown_hours = float(os.environ.get("SURVIVOR_RESEARCH_COOLDOWN_HOURS", "24"))
+            cutoff = current - timedelta(hours=cooldown_hours)
+            already_analyzed = any(
+                p.market_id == snapshot.market_id
+                and p.snapshot_data_hash == data_hash
+                and _parse_iso(p.timestamp_utc) >= cutoff
+                for p in eval_store.predictions(strategy_version=version)
+            )
+            if already_analyzed:
+                state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
+                                       candidate.score, "NO_TRADE", "SKIPPED", "CACHED_ANALYSIS")
+                report.details.setdefault("cached_analysis", []).append(snapshot.market_id)
+                continue
+
             if research_fn is None:
                 # Fail closed: a selected candidate must never silently vanish.
                 reason = "RESEARCH_CALLBACK_MISSING"

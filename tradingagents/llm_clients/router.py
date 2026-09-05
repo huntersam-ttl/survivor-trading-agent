@@ -181,7 +181,25 @@ class ModelRouter:
         """
         candidate_routes = self.resolve_routes(role)
         max_output_tokens = llm_kwargs.get("max_tokens") or self.policy.get_role_max_tokens(role)
-        llm_kwargs["max_tokens"] = max_output_tokens
+
+        # 0. Global cost governor — hard caps BEFORE any provider request:
+        #    kill switch, per-call input token cap, output clamp, call-rate
+        #    caps (per minute / per hour), and the daily USD budget. Governor
+        #    violations raise immediately (fail-safe, NO retry of the block).
+        #    The ledger backing the governor is the live budget ledger.
+        from tradingagents.llm_clients.cost_governor import CostGovernor
+
+        governor = CostGovernor(ledger=self.budget_manager.ledger)
+        primary_provider, primary_model = (
+            candidate_routes[0] if candidate_routes else ("openrouter", "unknown")
+        )
+        clamped_output = governor.pre_call_check(
+            provider=primary_provider,
+            model=primary_model,
+            est_input_tokens=est_input_tokens,
+            est_output_tokens=max_output_tokens,
+        )
+        llm_kwargs["max_tokens"] = clamped_output
 
         last_error: Exception | None = None
         attempted_errors: list[str] = []

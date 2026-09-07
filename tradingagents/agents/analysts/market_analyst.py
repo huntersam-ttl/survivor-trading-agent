@@ -13,15 +13,16 @@ def create_market_analyst(llm):
 
     def market_analyst_node(state):
         current_date = state["trade_date"]
+        is_prediction_market = state.get("asset_type") == "prediction_market"
         instrument_context = get_instrument_context_from_state(state)
 
-        tools = [
+        tools = [] if is_prediction_market else [
             get_stock_data,
             get_indicators,
             get_verified_market_snapshot,
         ]
 
-        system_message = (
+        stock_system_message = (
             """You are a trading assistant tasked with analyzing financial markets. Your role is to select the **most relevant indicators** for a given market condition or trading strategy from the following list. The goal is to choose up to **8 indicators** that provide complementary insights without redundancy. Categories and each category's indicators are:
 
 Moving Averages:
@@ -54,6 +55,15 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )
+        system_message = (
+            "You are analyzing a binary prediction market. Do not use stock, "
+            "Yahoo Finance, yfinance, OHLCV, or technical-indicator data. Reason "
+            "only from the supplied decision-time prediction-market snapshot: "
+            "YES probability, bid/ask, spread, liquidity, volume, and time to "
+            "resolution. State clearly when evidence is insufficient."
+            + get_language_instruction()
+            if is_prediction_market else stock_system_message
+        )
 
         prompt = ChatPromptTemplate.from_messages(
             [
@@ -78,13 +88,13 @@ Write a very detailed and nuanced report of the trends you observe. Provide spec
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(tools)
+        chain = prompt | (llm if is_prediction_market else llm.bind_tools(tools))
 
         result = chain.invoke(state["messages"])
 
         report = ""
 
-        if len(result.tool_calls) == 0:
+        if len(getattr(result, "tool_calls", [])) == 0:
             report = result.content
 
         return {

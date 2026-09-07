@@ -90,7 +90,7 @@ def _clean_identity_value(value: Any) -> str | None:
 
 
 @functools.lru_cache(maxsize=256)
-def resolve_instrument_identity(ticker: str) -> dict:
+def resolve_instrument_identity(ticker: str, asset_type: str = "stock") -> dict:
     """Resolve deterministic identity metadata (company name, sector, …) for a ticker.
 
     This exists to stop the pipeline from hallucinating a *different* company
@@ -107,7 +107,12 @@ def resolve_instrument_identity(ticker: str) -> dict:
     The symbol is normalized first (e.g. ``XAUUSD`` -> ``GC=F``) so identity
     resolves for the same instrument the price path actually fetches (#983).
     """
-    from tradingagents.dataflows.symbol_utils import normalize_symbol
+    from tradingagents.dataflows.symbol_utils import (
+        assert_stock_lookup_allowed,
+        normalize_symbol,
+    )
+
+    assert_stock_lookup_allowed(ticker, asset_type)
 
     try:
         info = yf.Ticker(normalize_symbol(ticker)).info or {}
@@ -146,6 +151,15 @@ def build_instrument_context(
     than pattern-matching the price chart to a wrong one (#814).
     """
     is_crypto = asset_type == "crypto"
+    is_prediction_market = asset_type == "prediction_market"
+    if is_prediction_market:
+        return (
+            f"This is a binary prediction market with opaque identifier `{ticker}`. "
+            "The identifier is NOT a stock ticker and must never be passed to "
+            "Yahoo Finance, yfinance, StockTwits, Reddit ticker search, company "
+            "fundamentals, or technical-indicator tools. Use the supplied stored "
+            "prediction-market snapshot and event/question context instead."
+        )
     instrument_label = "asset" if is_crypto else "instrument"
     context = (
         f"The {instrument_label} to analyze is `{ticker}`. "
@@ -226,6 +240,4 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
-
 

@@ -10,7 +10,11 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    PredictionMarketDecision,
+    render_pm_decision,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -24,6 +28,9 @@ from tradingagents.agents.utils.structured import (
 
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    structured_prediction_llm = bind_structured(
+        llm, PredictionMarketDecision, "Portfolio Manager (prediction market)"
+    )
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
@@ -64,14 +71,29 @@ def create_portfolio_manager(llm):
 
 Ground every conclusion in specific evidence from the analysts. Commit to a directional call only when the evidence clearly supports one; choose Hold when the case is balanced, materially conflicting, ambiguous, or insufficient to justify changing exposure, rather than forcing a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
 
+STRUCTURED OUTPUT CONTRACT: Return every required schema field. Never omit investment_thesis; it must be a non-empty explanation grounded in this prompt. For a binary prediction market, also return probability_yes and confidence as numbers from 0.0 to 1.0, plus non-empty key_evidence and key_risks lists. Do not place these fields only in prose.
+
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 
+        is_prediction_market = state.get("asset_type") == "prediction_market"
+        selected_llm = structured_prediction_llm if is_prediction_market else structured_llm
+        selected_schema = PredictionMarketDecision if is_prediction_market else PortfolioDecision
+        captured = {}
+
         final_trade_decision = invoke_structured_or_freetext(
-            structured_llm,
+            selected_llm,
             llm,
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+            schema=selected_schema,
+            repair_prompt=(
+                f"{prompt}\n\nREPAIR REQUIRED: Return a complete valid structured object now. "
+                "Use only evidence in the prompt; do not omit or invent required fields."
+                if is_prediction_market else None
+            ),
+            fail_on_structured_error=is_prediction_market,
+            on_structured_result=lambda decision: captured.__setitem__("decision", decision),
         )
 
         new_risk_debate_state = {
@@ -90,6 +112,7 @@ Ground every conclusion in specific evidence from the analysts. Commit to a dire
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            "portfolio_decision": captured.get("decision"),
         }
 
     return portfolio_manager_node

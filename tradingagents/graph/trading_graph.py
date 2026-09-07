@@ -412,7 +412,9 @@ class TradingAgentsGraph:
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
         """
-        identity = resolve_instrument_identity(ticker)
+        if asset_type == "prediction_market":
+            return build_instrument_context(ticker, asset_type)
+        identity = resolve_instrument_identity(ticker, asset_type)
         return build_instrument_context(ticker, asset_type, identity)
 
     def _memory_as_of(self, trade_date) -> str | None:

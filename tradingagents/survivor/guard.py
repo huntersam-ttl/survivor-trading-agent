@@ -85,11 +85,13 @@ class SurvivorLLM(Runnable):
         role: str,
         llm_kwargs: dict[str, Any] | None = None,
         transforms: tuple[Callable[[Any], Any], ...] = (),
+        structured: bool = False,
     ):
         self._router = router
         self._role = role
         self._llm_kwargs = dict(llm_kwargs or {})
         self._transforms = tuple(transforms)
+        self._structured = structured
         # Runnable.get_name() support for LangChain tracing/composition
         self.name = f"SurvivorLLM[{role}]"
 
@@ -97,14 +99,25 @@ class SurvivorLLM(Runnable):
     def role(self) -> str:
         return self._role
 
-    def _with_transform(self, fn: Callable[[Any], Any]) -> SurvivorLLM:
-        return SurvivorLLM(self._router, self._role, self._llm_kwargs, self._transforms + (fn,))
+    def _with_transform(self, fn: Callable[[Any], Any], *, structured: bool | None = None) -> SurvivorLLM:
+        return SurvivorLLM(
+            self._router,
+            self._role,
+            self._llm_kwargs,
+            self._transforms + (fn,),
+            self._structured if structured is None else structured,
+        )
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> SurvivorLLM:
         return self._with_transform(lambda llm: llm.bind_tools(tools, **kwargs))
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> SurvivorLLM:
-        return self._with_transform(lambda llm: llm.with_structured_output(schema, **kwargs))
+        # Structured-output calls use the ModelRouter's repair path (retry the
+        # same approved model once, then rotate within configured OpenRouter).
+        return self._with_transform(
+            lambda llm: llm.with_structured_output(schema, **kwargs),
+            structured=True,
+        )
 
     def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         """Route ONE guarded inference through ModelRouter/BudgetManager.
@@ -152,6 +165,7 @@ class SurvivorLLM(Runnable):
                 run_id=run_id,
                 ticker_or_market=ticker_or_market,
                 est_input_tokens=estimate_input_tokens(input),
+                purpose="structured_output" if self._structured else "standard",
                 llm_transform=transform_with_kwargs,
                 **router_kwargs,
                 **self._llm_kwargs,
@@ -163,6 +177,7 @@ class SurvivorLLM(Runnable):
             run_id=run_id,
             ticker_or_market=ticker_or_market,
             est_input_tokens=estimate_input_tokens(input),
+            purpose="structured_output" if self._structured else "standard",
             llm_transform=_chain_transforms(transforms),
             **router_kwargs,
             **self._llm_kwargs,

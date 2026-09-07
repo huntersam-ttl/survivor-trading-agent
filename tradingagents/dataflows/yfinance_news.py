@@ -9,7 +9,7 @@ from dateutil.relativedelta import relativedelta
 from .config import get_config
 from .date_window import in_window
 from .stockstats_utils import yf_retry
-from .symbol_utils import normalize_symbol
+from .symbol_utils import assert_stock_lookup_allowed, normalize_symbol
 
 
 def _extract_article_data(article: dict) -> dict:
@@ -76,6 +76,7 @@ def get_news_yfinance(
     Returns:
         Formatted string containing news articles
     """
+    assert_stock_lookup_allowed(ticker)
     article_limit = get_config()["news_article_limit"]
     # Query Yahoo with the canonical symbol, like every other yfinance path —
     # a raw broker/forex/crypto alias (XAUUSD, BTCUSD) otherwise silently

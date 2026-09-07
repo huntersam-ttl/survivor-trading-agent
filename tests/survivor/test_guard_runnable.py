@@ -223,6 +223,9 @@ def test_fallback_routes_stay_within_allowlist(monkeypatch):
     # hermetic: default routes with no OpenRouter override
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         llm, router, _ = _make_guarded_llm(tmpdir)
         allowed = {

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +186,47 @@ class InferenceUsageLedger:
         with self._get_connection() as conn:
             row = conn.execute(query, params).fetchone()
             return row["total"] or 0 if row else 0
+
+    def get_model_stats(
+        self,
+        provider: str,
+        model: str,
+        *,
+        window_hours: float = 24.0,
+    ) -> dict[str, Any]:
+        """Aggregate recent historical performance for a single (provider, model).
+
+        Used by ModelRouter's dynamic scoring: success rate and average latency
+        over the trailing ``window_hours`` of settled calls. Returns neutral
+        defaults when there is no history so routing is not biased by absence
+        of data.
+        """
+        now_utc = datetime.now(timezone.utc)
+        from_ts = (now_utc - timedelta(hours=window_hours)).isoformat()
+        to_ts = now_utc.isoformat()
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT status, latency_ms
+                FROM usage_records
+                WHERE provider = ? AND model = ?
+                  AND timestamp_utc >= ?
+                  AND timestamp_utc <= ?
+                """,
+                (provider.lower(), model, from_ts, to_ts),
+            ).fetchall()
+        calls = len(rows)
+        if calls == 0:
+            return {"calls": 0, "successes": 0, "success_rate": 0.5, "avg_latency_ms": None}
+        successes = sum(1 for r in rows if r["status"] == "SUCCESS")
+        latencies = [r["latency_ms"] for r in rows if r["latency_ms"] is not None]
+        avg_lat = sum(latencies) / len(latencies) if latencies else None
+        return {
+            "calls": calls,
+            "successes": successes,
+            "success_rate": successes / calls,
+            "avg_latency_ms": avg_lat,
+        }
 
     def get_run_usage_summary(self, run_id: str) -> dict[str, Any]:
         """Aggregate usage metrics by provider and role for a single run_id."""

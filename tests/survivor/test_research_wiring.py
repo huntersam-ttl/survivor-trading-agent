@@ -203,7 +203,7 @@ def test_provider_failure_isolated_and_explicit(tmp_path, monkeypatch):
         calls["n"] += 1
         if candidate.market_id == "mkt-0":
             return ResearchResult(status="FAILED", reason="INFERENCE_FAILED: provider down",
-                                  run_id=run_id)
+                                  run_id=run_id, ai_cost_pence=7)
         return _ok_research(run_id)
 
     report = _cycle(tmp_path, adapter, monkeypatch, research_fn=research)
@@ -212,6 +212,7 @@ def test_provider_failure_isolated_and_explicit(tmp_path, monkeypatch):
     assert len(report.candidate_failures) == 1
     assert report.candidate_failures[0]["reason"].startswith("INFERENCE_FAILED")
     assert report.candidate_failures[0]["market_id"] == "mkt-0"
+    assert report.ai_cost_pence == 7               # failed guarded work is still attributed
     assert calls["n"] == 2
 
 
@@ -241,6 +242,35 @@ def test_default_research_classifies_provider_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(tg_mod, "TradingAgentsGraph", _RouteGraph)
     result = _default_research(candidate, _quote_for(snap), {}, run_id="run_err2")
     assert result.reason.startswith("NO_MODEL_ROUTE")
+
+
+@pytest.mark.unit
+def test_default_research_attributes_failed_guarded_spend(tmp_path, monkeypatch):
+    from tradingagents.graph import trading_graph as tg_mod
+
+    usage = InferenceUsageLedger(db_path=str(tmp_path / "failed-usage.db"))
+    snap = make_snapshot("mkt-cost-fail")
+    candidate = type("C", (), {"snapshot": snap, "market_id": snap.market_id})()
+
+    class _PaidThenBrokenGraph:
+        def __init__(self, config=None, **kwargs):
+            pass
+
+        def propagate(self, *a, **k):
+            usage.record_inference(
+                run_id="run_cost_fail", agent_role="market_analyst", provider="openrouter",
+                model="test/model", ticker_or_market="pm-cost", input_tokens=100,
+                output_tokens=20, reasoning_tokens=0, native_cost_minor=1,
+                native_currency="USD", gbp_cost_pence=6,
+            )
+            raise ValueError("provider response could not be parsed")
+
+    monkeypatch.setattr(tg_mod, "TradingAgentsGraph", _PaidThenBrokenGraph)
+    result = _default_research(
+        candidate, _quote_for(snap), {"_usage_ledger": usage}, run_id="run_cost_fail"
+    )
+    assert result.status == "FAILED"
+    assert result.ai_cost_pence == 6
 
 
 # --- 7. budget unavailable behavior preserved -------------------------------------

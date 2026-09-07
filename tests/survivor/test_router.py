@@ -24,7 +24,10 @@ def test_router(monkeypatch):
     # hermetic: default role routes regardless of operator OpenRouter env
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_router.db")
         ledger = InferenceUsageLedger(db_path=db_path)
@@ -53,6 +56,9 @@ def test_router_healthy_fallback(test_router, monkeypatch):
     # hermetic: default role routes, no OpenRouter override
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)
 
     # Mark DeepSeek as unhealthy (rate limit cooldown)
     router.health_manager.record_failure("deepseek", ProviderErrorCategory.RATE_LIMIT)

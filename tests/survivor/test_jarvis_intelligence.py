@@ -11,6 +11,7 @@ import datetime as _dt
 import pytest
 import requests as _requests
 
+from tests.survivor.market_helpers import FakeMarketAdapter, make_snapshot
 from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
 from tradingagents.survivor.autonomy import cycle as cycle_mod
 from tradingagents.survivor.autonomy.cycle import (
@@ -21,15 +22,14 @@ from tradingagents.survivor.autonomy.cycle import (
 )
 from tradingagents.survivor.autonomy.state import RuntimeState
 from tradingagents.survivor.intelligence import (
+    MAX_ANALYSES,
     JarvisDigest,
     JarvisIntelligenceClient,
-    MAX_ANALYSES,
     fingerprint_analyses,
     remember_digest_fingerprint,
     research_state_hash,
 )
 from tradingagents.survivor.policy import SurvivorPolicy
-from tests.survivor.market_helpers import FakeMarketAdapter, make_snapshot
 
 
 def _analysis(i: int) -> dict:
@@ -267,9 +267,8 @@ class _CaptureGraph:
 
 @pytest.mark.unit
 def test_default_research_folds_digest_into_research_context(monkeypatch):
-    from tradingagents.survivor.execution.pricing import MarketSnapshot as QuoteSnapshot
-
     import tradingagents.graph.trading_graph as tg_mod
+    from tradingagents.survivor.execution.pricing import MarketSnapshot as QuoteSnapshot
 
     monkeypatch.setattr(tg_mod, "TradingAgentsGraph", _CaptureGraph)
     snap = make_snapshot("mkt-jarv")
@@ -289,9 +288,8 @@ def test_default_research_folds_digest_into_research_context(monkeypatch):
 
 @pytest.mark.unit
 def test_default_research_without_digest_is_unchanged(monkeypatch):
-    from tradingagents.survivor.execution.pricing import MarketSnapshot as QuoteSnapshot
-
     import tradingagents.graph.trading_graph as tg_mod
+    from tradingagents.survivor.execution.pricing import MarketSnapshot as QuoteSnapshot
 
     monkeypatch.setattr(tg_mod, "TradingAgentsGraph", _CaptureGraph)
     snap = make_snapshot("mkt-plain")
@@ -314,14 +312,19 @@ def _config(**over):
 
 def _cycle(tmp_path, adapter, monkeypatch, research_fn=None, usage_ledger=None, **cfg):
     monkeypatch.delenv("SURVIVOR_DRY_RUN", raising=False)
+    config = _config(**cfg)
+    config["_evaluation_db_path"] = str(tmp_path / "evaluation.db")
+    config["_heartbeat_path"] = str(tmp_path / "heartbeat.json")
     return run_survivor_cycle(
-        _config(**cfg),
+        config,
         adapter=adapter,
         research_fn=research_fn,
         paper_ledger_path=str(tmp_path / "paper.db"),
         runtime_state=RuntimeState(db_path=str(tmp_path / "runtime.db")),
         usage_ledger=usage_ledger or InferenceUsageLedger(db_path=str(tmp_path / "usage.db")),
         policy=SurvivorPolicy(),
+        lock_path=str(tmp_path / "cycle.lock"),
+        halt_path=str(tmp_path / "HALT"),
     )
 
 
@@ -390,6 +393,7 @@ def test_acquire_jarvis_intel_disabled_reports_enabled_false():
 @pytest.mark.unit
 def test_no_live_trade_path_introduced():
     import inspect
+
     import tradingagents.survivor.intelligence as m
 
     src = inspect.getsource(m)

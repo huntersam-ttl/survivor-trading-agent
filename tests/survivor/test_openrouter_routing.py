@@ -29,7 +29,11 @@ STRONG = "fake/strong-model"
 
 
 @pytest.fixture(autouse=True)
-def _clean_pricing_catalog():
+def _clean_pricing_catalog(monkeypatch):
+    # Keep local operator configuration from leaking into hermetic tests.
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)
     yield
     MODEL_PRICING.pop(("openrouter", CHEAP), None)
     MODEL_PRICING.pop(("openrouter", STRONG), None)
@@ -107,7 +111,12 @@ def test_unknown_openrouter_price_fails_closed(monkeypatch):
     monkeypatch.setenv("SURVIVOR_OPENROUTER_MODEL", CHEAP)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING", raising=False)
 
-    router = ModelRouter(SurvivorPolicy())
+    # Use a temporary ledger so a fail-closed test never touches operator state.
+    from tradingagents.llm_clients.budget import BudgetManager
+
+    ledger = InferenceUsageLedger(db_path=tempfile.mkdtemp() + "/unknown-price.db")
+    policy = SurvivorPolicy()
+    router = ModelRouter(policy, budget_manager=BudgetManager(policy, ledger=ledger))
     assert get_model_price("openrouter", CHEAP) is None   # never priced by name
 
     called_providers = []

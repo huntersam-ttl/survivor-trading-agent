@@ -309,7 +309,7 @@ class _JarvisRequestHandler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._send_json(exc.status, {"error": {"code": exc.code, "message": exc.message}})
             return
-        except Exception as exc:  # noqa: BLE001 - never leak internals to callers
+        except Exception:  # noqa: BLE001 - never leak internals to callers
             logger.exception("unhandled error serving %s %s", method, path)
             self._send_json(500, {"error": {"code": "INTERNAL", "message": "internal server error"}})
             return

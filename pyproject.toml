@@ -47,6 +47,8 @@ bedrock = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+survivor-run-once = "cli.main:survivor_run_once"
+survivor-budget = "cli.main:survivor_budget"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]

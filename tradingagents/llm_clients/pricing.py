@@ -8,6 +8,11 @@ from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from tradingagents.survivor.types import UnknownPriceError
 
+# Current fallback default OpenRouter model. The operator-facing default is
+# config-driven via SURVIVOR_OPENROUTER_DEFAULT_MODEL; this value is used only
+# when no default/legacy model variable is set.
+DEFAULT_OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731"
+
 
 @dataclass(frozen=True)
 class ModelPrice:
@@ -25,32 +30,63 @@ class ModelPrice:
 MODEL_PRICING: dict[tuple[str, str], ModelPrice] = {
     # OpenAI Models
     ("openai", "gpt-5.6"): ModelPrice("openai", "gpt-5.6", Decimal("2.50"), Decimal("10.00")),
-    ("openai", "gpt-5.6-luna"): ModelPrice("openai", "gpt-5.6-luna", Decimal("0.15"), Decimal("0.60")),
+    ("openai", "gpt-5.6-luna"): ModelPrice(
+        "openai", "gpt-5.6-luna", Decimal("0.15"), Decimal("0.60")
+    ),
     ("openai", "gpt-4.1"): ModelPrice("openai", "gpt-4.1", Decimal("2.50"), Decimal("10.00")),
     ("openai", "gpt-4o"): ModelPrice("openai", "gpt-4o", Decimal("2.50"), Decimal("10.00")),
-    ("openai", "gpt-4o-mini"): ModelPrice("openai", "gpt-4o-mini", Decimal("0.15"), Decimal("0.60")),
+    ("openai", "gpt-4o-mini"): ModelPrice(
+        "openai", "gpt-4o-mini", Decimal("0.15"), Decimal("0.60")
+    ),
     ("openai", "o1"): ModelPrice("openai", "o1", Decimal("15.00"), Decimal("60.00")),
     ("openai", "o3-mini"): ModelPrice("openai", "o3-mini", Decimal("1.10"), Decimal("4.40")),
-
     # DeepSeek Models
-    ("deepseek", "deepseek-chat"): ModelPrice("deepseek", "deepseek-chat", Decimal("0.14"), Decimal("0.28")),
-    ("deepseek", "deepseek-reasoner"): ModelPrice("deepseek", "deepseek-reasoner", Decimal("0.55"), Decimal("2.19")),
-    ("deepseek", "deepseek-v3"): ModelPrice("deepseek", "deepseek-v3", Decimal("0.14"), Decimal("0.28")),
-    ("deepseek", "deepseek-v4"): ModelPrice("deepseek", "deepseek-v4", Decimal("0.20"), Decimal("0.80")),
-
+    ("deepseek", "deepseek-chat"): ModelPrice(
+        "deepseek", "deepseek-chat", Decimal("0.14"), Decimal("0.28")
+    ),
+    ("deepseek", "deepseek-reasoner"): ModelPrice(
+        "deepseek", "deepseek-reasoner", Decimal("0.55"), Decimal("2.19")
+    ),
+    ("deepseek", "deepseek-v3"): ModelPrice(
+        "deepseek", "deepseek-v3", Decimal("0.14"), Decimal("0.28")
+    ),
+    ("deepseek", "deepseek-v4"): ModelPrice(
+        "deepseek", "deepseek-v4", Decimal("0.20"), Decimal("0.80")
+    ),
     # MiniMax Models
-    ("minimax", "minimax-text-01"): ModelPrice("minimax", "minimax-text-01", Decimal("0.20"), Decimal("1.10")),
-    ("minimax", "abab6.5s-chat"): ModelPrice("minimax", "abab6.5s-chat", Decimal("0.20"), Decimal("1.00")),
-    ("minimax", "minimax-m2"): ModelPrice("minimax", "minimax-m2", Decimal("0.30"), Decimal("1.20")),
-    ("minimax-cn", "minimax-text-01"): ModelPrice("minimax-cn", "minimax-text-01", Decimal("0.20"), Decimal("1.10")),
-
+    ("minimax", "minimax-text-01"): ModelPrice(
+        "minimax", "minimax-text-01", Decimal("0.20"), Decimal("1.10")
+    ),
+    ("minimax", "abab6.5s-chat"): ModelPrice(
+        "minimax", "abab6.5s-chat", Decimal("0.20"), Decimal("1.00")
+    ),
+    ("minimax", "minimax-m2"): ModelPrice(
+        "minimax", "minimax-m2", Decimal("0.30"), Decimal("1.20")
+    ),
+    ("minimax-cn", "minimax-text-01"): ModelPrice(
+        "minimax-cn", "minimax-text-01", Decimal("0.20"), Decimal("1.10")
+    ),
     # Google Gemini Models
-    ("google", "gemini-2.5-flash"): ModelPrice("google", "gemini-2.5-flash", Decimal("0.075"), Decimal("0.30")),
-    ("google", "gemini-2.5-pro"): ModelPrice("google", "gemini-2.5-pro", Decimal("1.25"), Decimal("5.00")),
-
+    ("google", "gemini-2.5-flash"): ModelPrice(
+        "google", "gemini-2.5-flash", Decimal("0.075"), Decimal("0.30")
+    ),
+    ("google", "gemini-2.5-pro"): ModelPrice(
+        "google", "gemini-2.5-pro", Decimal("1.25"), Decimal("5.00")
+    ),
     # Anthropic Claude Models
-    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPrice("anthropic", "claude-3-5-sonnet-20241022", Decimal("3.00"), Decimal("15.00")),
-    ("anthropic", "claude-3-5-haiku-20241022"): ModelPrice("anthropic", "claude-3-5-haiku-20241022", Decimal("0.80"), Decimal("4.00")),
+    ("anthropic", "claude-3-5-sonnet-20241022"): ModelPrice(
+        "anthropic", "claude-3-5-sonnet-20241022", Decimal("3.00"), Decimal("15.00")
+    ),
+    ("anthropic", "claude-3-5-haiku-20241022"): ModelPrice(
+        "anthropic", "claude-3-5-haiku-20241022", Decimal("0.80"), Decimal("4.00")
+    ),
+    # OpenRouter catalog entries require the exact OpenRouter model ID and
+    # explicit pricing. The current DeepSeek V4 Flash 0731 default is
+    # intentionally absent until its exact OpenRouter price is supplied via
+    # SURVIVOR_OPENROUTER_PRICING_MAP; routing must fail closed meanwhile.
+    ("openrouter", "z-ai/glm-5.3"): ModelPrice(
+        "openrouter", "z-ai/glm-5.3", Decimal("0.28"), Decimal("1.10")
+    ),
 }
 
 
@@ -77,7 +113,10 @@ def register_openrouter_env_pricing() -> None:
     model name. A malformed value raises (fail loudly, never guess).
     """
     raw = os.environ.get("SURVIVOR_OPENROUTER_PRICING", "").strip()
-    model = os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    model = (
+        os.environ.get("SURVIVOR_OPENROUTER_DEFAULT_MODEL", "").strip()
+        or os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    )
     if not raw or not model:
         return
     parts = [p.strip() for p in raw.split(",")]
@@ -92,10 +131,58 @@ def register_openrouter_env_pricing() -> None:
     except InvalidOperation as exc:
         raise ValueError(f"Invalid SURVIVOR_OPENROUTER_PRICING: {raw!r}") from exc
     if in_price <= 0 or out_price <= 0:
-        raise ValueError(
-            f"SURVIVOR_OPENROUTER_PRICING values must be positive, got {raw!r}"
-        )
+        raise ValueError(f"SURVIVOR_OPENROUTER_PRICING values must be positive, got {raw!r}")
     register_model_price(ModelPrice("openrouter", model, in_price, out_price))
+
+
+def register_openrouter_env_pricing_map() -> None:
+    """Register explicit per-model pricing for a rotation set of OpenRouter models.
+
+    ``SURVIVOR_OPENROUTER_PRICING_MAP="model1:in,out;model2:in,out"``
+    (e.g. ``"z-ai/glm-5.3-flash:0.05,0.20;z-ai/glm-5.3:0.28,1.10"``). Together with
+    ``SURVIVOR_OPENROUTER_MODELS`` this lets ModelRouter rotate among several
+    approved OpenRouter models, each with its own explicit price. Any model
+    without an explicit entry stays UNPRICED and fails closed (UnknownPriceError)
+    — price is never assumed from the model name. A malformed value raises.
+    """
+    raw = os.environ.get("SURVIVOR_OPENROUTER_PRICING_MAP", "").strip()
+    if not raw:
+        return
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(
+                "Invalid SURVIVOR_OPENROUTER_PRICING_MAP entry: expected "
+                f"'<model>:<in>,<out>', got {entry!r}"
+            )
+        # OpenRouter model IDs may themselves contain a colon (for example,
+        # ``model:nitro``), so the final colon separates the model from prices.
+        model, raw_price = entry.rsplit(":", 1)
+        model = model.strip()
+        raw_price = raw_price.strip()
+        if not model or not raw_price:
+            raise ValueError(
+                "Invalid SURVIVOR_OPENROUTER_PRICING_MAP entry: expected "
+                f"'<model>:<in>,<out>', got {entry!r}"
+            )
+        parts = [p.strip() for p in raw_price.split(",")]
+        if len(parts) != 2:
+            raise ValueError(
+                "Invalid SURVIVOR_OPENROUTER_PRICING_MAP entry: expected "
+                f"'<model>:<in>,<out>', got {entry!r}"
+            )
+        try:
+            in_price = Decimal(parts[0])
+            out_price = Decimal(parts[1])
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid SURVIVOR_OPENROUTER_PRICING_MAP price: {entry!r}") from exc
+        if in_price <= 0 or out_price <= 0:
+            raise ValueError(
+                f"SURVIVOR_OPENROUTER_PRICING_MAP values must be positive, got {entry!r}"
+            )
+        register_model_price(ModelPrice("openrouter", model, in_price, out_price))
 
 
 @dataclass(frozen=True)
@@ -104,7 +191,7 @@ class CostEstimate:
 
     native_cost_minor: int  # e.g. cents if USD
     native_currency: str
-    gbp_cost_pence: int     # integer pence
+    gbp_cost_pence: int  # integer pence
 
 
 def calculate_cost(
@@ -145,19 +232,29 @@ def calculate_cost(
     total_native_currency = cost_in + cost_out + cost_cache
 
     if price.native_currency.upper() == "USD":
-        native_minor = int((total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        native_minor = int(
+            (total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        )
         if usd_gbp_rate is None or usd_gbp_rate <= 0:
             raise UnknownPriceError("FX rate USD_GBP_RATE is unavailable or invalid.")
         gbp_pounds = total_native_currency / usd_gbp_rate
-        gbp_pence = int((gbp_pounds * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        gbp_pence = int(
+            (gbp_pounds * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        )
     elif price.native_currency.upper() == "GBP":
-        gbp_pence = int((total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        gbp_pence = int(
+            (total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        )
         native_minor = gbp_pence
     else:
         # Generic native currency -> convert using 1:1 fallback or raise if unknown
-        native_minor = int((total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        native_minor = int(
+            (total_native_currency * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        )
         gbp_pounds = total_native_currency / usd_gbp_rate
-        gbp_pence = int((gbp_pounds * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING))
+        gbp_pence = int(
+            (gbp_pounds * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_CEILING)
+        )
 
     return CostEstimate(
         native_cost_minor=native_minor,

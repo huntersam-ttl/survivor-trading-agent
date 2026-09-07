@@ -30,6 +30,11 @@ from tradingagents.survivor.execution.ledger import LedgerCorruptionError
 from tradingagents.survivor.execution.paper_broker import PaperBroker
 from tradingagents.survivor.execution.pricing import MarketSnapshot as QuoteSnapshot
 from tradingagents.survivor.execution.resolution import settle_prediction_position
+from tradingagents.survivor.intelligence import (
+    JarvisIntelligenceClient,
+    remember_digest_fingerprint,
+    research_state_hash,
+)
 from tradingagents.survivor.markets.filters import scan_limits_from_env
 from tradingagents.survivor.markets.scanner import MarketScanner
 from tradingagents.survivor.markets.types import Candidate
@@ -37,11 +42,6 @@ from tradingagents.survivor.policy import SurvivorPolicy
 from tradingagents.survivor.risk.engine import RiskEngine
 from tradingagents.survivor.risk.limits import risk_limits_from_env
 from tradingagents.survivor.trading.proposal import ProposalBuilder, RiskInputs
-from tradingagents.survivor.intelligence import (
-    JarvisIntelligenceClient,
-    remember_digest_fingerprint,
-    research_state_hash,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +236,8 @@ def _market_evidence_context(candidate: Candidate, quote: QuoteSnapshot) -> str:
         "POINT-IN-TIME RULE: reason ONLY from the decision-time snapshot above. News, search and "
         "market-data tools may supply general background, but any current market quote that "
         "differs from the snapshot MUST NOT replace it.",
+        "STRUCTURED DECISION CONTRACT: return probability_yes and confidence as numbers from "
+        "0.0 to 1.0, a non-empty investment_thesis, and non-empty key_evidence and key_risks.",
         "FINAL DECISION FORMAT: your final decision MUST include a line exactly "
         "'P(YES): <NN>%' where <NN> is your calibrated probability estimate (0-100) that this "
         "binary event resolves YES.",
@@ -243,8 +245,14 @@ def _market_evidence_context(candidate: Candidate, quote: QuoteSnapshot) -> str:
     return f"{header}\n\n{question_block}"
 
 
-def _research_failure(reason: str, run_id: str | None) -> ResearchResult:
-    return ResearchResult(status="FAILED", reason=reason[:200], run_id=run_id)
+def _research_failure(
+    reason: str,
+    run_id: str | None,
+    ai_cost_pence: int = 0,
+) -> ResearchResult:
+    return ResearchResult(
+        status="FAILED", reason=reason[:200], run_id=run_id, ai_cost_pence=ai_cost_pence
+    )
 
 
 def _classify_inference_error(exc: Exception) -> str:
@@ -370,7 +378,17 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
     # Central OpenRouter operation (optional): when the operator configures an
     # OpenRouter key + model, the graph's construction clients use the existing
     # OpenRouter provider path too, so ONE key runs the whole research run.
-    or_model = os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    configured_models = [
+        model.strip()
+        for model in os.environ.get("SURVIVOR_OPENROUTER_MODELS", "").split(",")
+        if model.strip()
+    ]
+    or_model = (
+        configured_models[0]
+        if configured_models
+        else os.environ.get("SURVIVOR_OPENROUTER_DEFAULT_MODEL", "").strip()
+        or os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    )
     if or_model and os.environ.get("OPENROUTER_API_KEY", "").strip():
         or_strong = os.environ.get("SURVIVOR_OPENROUTER_STRONG_MODEL", "").strip() or or_model
         research_config["llm_provider"] = "openrouter"
@@ -384,19 +402,34 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
     except ImportError as exc:
         return _research_failure(f"RESEARCH_BACKEND_UNAVAILABLE: {exc}", run_id)
     except Exception as exc:  # noqa: BLE001 - classified below, never silent
-        return _research_failure(_classify_inference_error(exc), run_id)
+        failed_cost = (
+            int(usage.get_run_usage_summary(run_id).get("total_cost_pence") or 0)
+            if usage is not None else 0
+        )
+        return _research_failure(_classify_inference_error(exc), run_id, failed_cost)
 
     usage_summary = usage.get_run_usage_summary(run_id) if usage is not None else {}
     ai_cost_pence = int(usage_summary.get("total_cost_pence") or 0)
 
     decision_text = str((final_state or {}).get("final_trade_decision") or "")
-    match = _P_YES_RE.search(decision_text)
-    if not match:
-        return _research_failure(
-            "RESEARCH_NO_PROBABILITY_ESTIMATE: final decision missing 'P(YES): <NN>%' line",
-            run_id,
-        )
-    probability_bps = min(10000, max(0, round(float(match.group(1)) * 100)))
+    typed_decision = (final_state or {}).get("portfolio_decision")
+    probability = getattr(typed_decision, "probability_yes", None)
+    if probability is None and isinstance(typed_decision, dict):
+        probability = typed_decision.get("probability_yes")
+    try:
+        probability = float(probability) if probability is not None else None
+    except (TypeError, ValueError):
+        probability = None
+    if probability is not None and 0.0 <= probability <= 1.0:
+        probability_bps = round(probability * 10000)
+    else:
+        match = _P_YES_RE.search(decision_text)
+        if not match:
+            return _research_failure(
+                "RESEARCH_NO_PROBABILITY_ESTIMATE: final decision missing structured probability and 'P(YES): <NN>%' line",
+                run_id,
+            )
+        probability_bps = min(10000, max(0, round(float(match.group(1)) * 100)))
 
     return ResearchResult(
         decision_text=decision_text,
@@ -424,6 +457,7 @@ def run_survivor_cycle(
     policy: SurvivorPolicy | None = None,
     now: datetime | None = None,
     lock_path: str | None = None,
+    halt_path: str | None = None,
 ) -> CycleReport:
     started = time.time()
     current = now or datetime.now(timezone.utc)
@@ -433,7 +467,7 @@ def run_survivor_cycle(
     state = runtime_state or RuntimeState()
 
     # 1. External kill switch: no scan, no AI, no proposals, no executions.
-    if halt_mod.is_halted():
+    if halt_mod.is_halted(halt_path):
         report.status = "EXTERNAL_HALT"
         report.reason = "HALT file present; autonomous cycle refused"
         state.start_cycle(cycle_id, now=current)
@@ -464,7 +498,7 @@ def run_survivor_cycle(
             state.start_cycle(cycle_id, now=current)
             _run_cycle_body(
                 report, cycle_id, config, current, limits, adapter, research_fn,
-                paper_ledger, state, usage_ledger, policy,
+                paper_ledger, state, usage_ledger, policy, halt_path,
             )
         except LedgerCorruptionError as exc:
             halt_mod.set_halt()
@@ -498,6 +532,7 @@ def _run_cycle_body(
     state: RuntimeState,
     usage_ledger: InferenceUsageLedger | None,
     policy: SurvivorPolicy | None,
+    halt_path: str | None,
 ) -> None:
 
     broker = PaperBroker(limits=limits, ledger=paper_ledger_path)
@@ -617,6 +652,7 @@ def _run_cycle_body(
                 continue
             result = research_fn(candidate, quote, config, run_id)
             if result.status != "OK" or result.expected_probability_bps is None or result.quantity is None:
+                report.ai_cost_pence += result.ai_cost_pence
                 report.candidate_failures.append(
                     {"market_id": snapshot.market_id, "reason": result.reason or "RESEARCH_FAILED"}
                 )
@@ -754,13 +790,16 @@ def _run_cycle_body(
     from tradingagents.survivor.ops.health import heartbeat_write, watchdog_record
 
     watchdog_record(state, "consecutive_cycle_failures", success=report.status in ("ACTIVE", "DRY_RUN"))
-    for _failure in report.candidate_failures:
-        watchdog_record(state, "consecutive_market_failures", success=False, halt_threshold=10)
+    if report.candidate_failures:
+        for _failure in report.candidate_failures:
+            watchdog_record(state, "consecutive_market_failures", success=False, halt_threshold=10)
+    else:
+        watchdog_record(state, "consecutive_market_failures", success=True, halt_threshold=10)
     heartbeat_write(
         trial_id=trial_id, pid=os.getpid(),
         mode="DRY_RUN" if dry_run_enabled(config) else "PAPER",
         last_cycle_id=cycle_id, last_cycle_status=report.status,
-        halt_state="HALTED" if halt_mod.is_halted() else "CLEAR",
+        halt_state="HALTED" if halt_mod.is_halted(halt_path) else "CLEAR",
         heartbeat_path=config.get("_heartbeat_path"),
     )
     # AI spend alerts at 50/75/90/100% of daily budget (100% blocks via preflight)
@@ -768,9 +807,3 @@ def _run_cycle_body(
 
     for alert in spend_alerts(usage, survivor_policy):
         report.warnings.append(alert)
-
-
-
-
-
-

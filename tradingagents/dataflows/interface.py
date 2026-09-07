@@ -1,4 +1,5 @@
 import logging
+import os
 
 from .alpha_vantage import (
     get_balance_sheet as get_alpha_vantage_balance_sheet,
@@ -19,6 +20,7 @@ from .errors import (
 )
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .symbol_utils import assert_stock_lookup_allowed
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -31,6 +33,7 @@ from .y_finance import (
 from .yfinance_news import get_global_news_yfinance, get_news_yfinance
 
 logger = logging.getLogger(__name__)
+_fred_missing_logged = False
 
 # Tools organized by category
 TOOLS_CATEGORIES = {
@@ -167,8 +170,26 @@ def get_vendor(category: str, method: str = None) -> str:
 
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
+    global _fred_missing_logged
+    asset_type = kwargs.pop("asset_type", "stock")
+    if method in {
+        "get_stock_data", "get_indicators", "get_fundamentals", "get_balance_sheet",
+        "get_cashflow", "get_income_statement", "get_news", "get_insider_transactions",
+    }:
+        symbol = args[0] if args else kwargs.get("symbol", kwargs.get("ticker"))
+        assert_stock_lookup_allowed(symbol, asset_type)
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
+    fred_impl = VENDOR_METHODS.get(method, {}).get("fred")
+    if (
+        method == "get_macro_indicators"
+        and fred_impl is get_fred_macro_data
+        and not os.getenv("FRED_API_KEY", "").strip()
+    ):
+        if not _fred_missing_logged:
+            logger.info("Optional FRED macro enrichment skipped: FRED_API_KEY is not configured")
+            _fred_missing_logged = True
+        return "DATA_UNAVAILABLE: optional macro_data is not configured; proceed without it."
     primary_vendors = [v.strip() for v in vendor_config.split(',')]
 
     if method not in VENDOR_METHODS:
@@ -204,7 +225,8 @@ def route_to_vendor(method: str, *args, **kwargs):
             logger.warning("Vendor %r rate-limited for %s; trying next vendor.", vendor, method)
             continue
         except VendorNotConfiguredError as e:
-            logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)
+            if category not in OPTIONAL_CATEGORIES:
+                logger.warning("Vendor %r not configured for %s; trying next vendor.", vendor, method)
             if first_error is None:
                 first_error = e  # Surface it if no other vendor can serve the call.
             continue

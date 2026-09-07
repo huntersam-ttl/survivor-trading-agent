@@ -146,6 +146,15 @@ def test_candidate_failure_isolated_others_continue(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_successful_cycle_resets_market_failure_watchdog(tmp_path, monkeypatch):
+    from tradingagents.survivor.ops.health import watchdog_record
+
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    assert watchdog_record(state, "consecutive_market_failures", success=False, halt_threshold=10) == 1
+    assert watchdog_record(state, "consecutive_market_failures", success=True, halt_threshold=10) == 0
+
+
+@pytest.mark.unit
 def test_paper_ledger_corruption_halts_runtime(tmp_path, monkeypatch):
     import sqlite3
 
@@ -212,5 +221,4 @@ def test_malicious_text_cannot_alter_safety_controls(tmp_path, monkeypatch):
     assert RiskLimits().allow_leverage is False and RiskLimits().allow_shorting is False
     assert SurvivorPolicy().mode.value == "PAPER_ONLY"
     assert report.paper_trades == 1  # normal deterministic paper path, nothing more
-
 

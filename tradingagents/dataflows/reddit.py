@@ -32,7 +32,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .date_window import in_window
-from .symbol_utils import crypto_base
+from .symbol_utils import assert_stock_lookup_allowed, crypto_base
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,7 @@ def fetch_reddit_posts(
     that window so a historical run does not leak current discussion into a
     backtest (#1220).
     """
+    assert_stock_lookup_allowed(ticker)
     # Crypto reaches us as a Yahoo pair (BTC-USD); search Reddit for the base
     # ("BTC") so the query actually matches discussion instead of near-nothing.
     ticker = crypto_base(ticker) or ticker

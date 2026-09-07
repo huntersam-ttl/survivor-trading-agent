@@ -30,6 +30,22 @@ from .errors import NoMarketDataError as NoMarketDataError
 logger = logging.getLogger(__name__)
 
 
+def assert_stock_lookup_allowed(symbol: str, asset_type: str = "stock") -> None:
+    """Reject stock-data lookups for prediction-market instruments.
+
+    Prediction-market IDs are opaque internal identifiers, not Yahoo symbols.
+    This guard is intentionally identifier-based as well as mode-based so it
+    protects direct vendor callers that do not carry graph state.
+    """
+    is_prediction_market = str(asset_type).strip().lower() == "prediction_market"
+    is_opaque_market_id = isinstance(symbol, str) and symbol.strip().lower().startswith("pm_")
+    if is_prediction_market or is_opaque_market_id:
+        raise ValueError(
+            "PREDICTION_MARKET_STOCK_LOOKUP_BLOCKED: stock/Yahoo data lookup "
+            f"is not allowed for prediction-market instrument {symbol!r}."
+        )
+
+
 # ISO-4217 codes common enough to appear in retail forex pairs. A bare
 # six-letter symbol whose halves are BOTH in this set is treated as a spot
 # forex pair and given Yahoo's ``=X`` suffix.

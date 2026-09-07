@@ -156,7 +156,6 @@ class TraderProposal(BaseModel):
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
-
 def render_trader_proposal(proposal: TraderProposal) -> str:
     """Render a TraderProposal to markdown.
 
@@ -232,6 +231,34 @@ class PortfolioDecision(BaseModel):
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
+    @field_validator("investment_thesis")
+    @classmethod
+    def _thesis_required(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("investment_thesis must be non-empty")
+        return value
+
+
+class PredictionMarketDecision(PortfolioDecision):
+    """Complete typed decision contract for binary prediction markets."""
+
+    probability_yes: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Probability from 0.0 to 1.0 that this binary event resolves YES.",
+    )
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Confidence from 0.0 to 1.0 in the probability estimate.",
+    )
+    key_evidence: list[str] = Field(
+        ..., min_length=1,
+        description="One or more concrete evidence points supporting the estimate.",
+    )
+    key_risks: list[str] = Field(
+        ..., min_length=1,
+        description="One or more concrete uncertainties or risks to the estimate.",
+    )
+
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
     """Render a PortfolioDecision back to the markdown shape the rest of the system expects.
@@ -252,6 +279,15 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if isinstance(decision, PredictionMarketDecision):
+        parts.extend([
+            "", f"**Probability YES**: {decision.probability_yes}",
+            "", f"**Confidence**: {decision.confidence}",
+            "", "**Key Evidence**:",
+            *[f"- {item}" for item in decision.key_evidence],
+            "", "**Key Risks**:",
+            *[f"- {item}" for item in decision.key_risks],
+        ])
     return "\n".join(parts)
 
 

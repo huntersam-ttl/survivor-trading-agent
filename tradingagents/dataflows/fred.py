@@ -39,6 +39,8 @@ DEFAULT_LOOKBACK_DAYS = 365
 # daily series (yields, VIX) over a long window would otherwise flood context.
 MAX_ROWS = 40
 
+_missing_key_warned = False
+
 # Curated human-friendly aliases -> FRED series IDs. Anything not listed is used
 # verbatim as a raw FRED series ID, so power users are never limited to this set.
 MACRO_SERIES = {
@@ -90,8 +92,12 @@ class FredNotConfiguredError(VendorNotConfiguredError):
 
 def get_api_key() -> str:
     """Retrieve the FRED API key from the environment."""
+    global _missing_key_warned
     api_key = os.getenv("FRED_API_KEY")
     if not api_key:
+        if not _missing_key_warned:
+            logger.warning("FRED_API_KEY is not configured; skipping optional FRED macro enrichment")
+            _missing_key_warned = True
         raise FredNotConfiguredError(
             "FRED_API_KEY environment variable is not set. Get a free key at "
             "https://fred.stlouisfed.org/docs/api/api_key.html."

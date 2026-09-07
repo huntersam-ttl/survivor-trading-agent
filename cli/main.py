@@ -1344,6 +1344,28 @@ def survivor_budget_cmd():
     from tradingagents.survivor import get_policy
 
     policy = get_policy()
+
+    # Fail clearly on malformed pricing configuration (never fail silently).
+    model = (
+        os.environ.get("SURVIVOR_OPENROUTER_DEFAULT_MODEL", "").strip()
+        or os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    )
+    from tradingagents.llm_clients.pricing import (
+        get_model_price,
+        register_openrouter_env_pricing,
+        register_openrouter_env_pricing_map,
+    )
+
+    price = None
+    if model:
+        try:
+            register_openrouter_env_pricing()
+            register_openrouter_env_pricing_map()
+            price = get_model_price("openrouter", model)
+        except ValueError as exc:
+            console.print(f"[red]Malformed pricing configuration: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+
     ledger = InferenceUsageLedger()
 
     op_d = ledger.get_daily_spend_pence("openai")
@@ -1372,6 +1394,19 @@ def survivor_budget_cmd():
     console.print(f"MiniMax  £{mm_m / 100:.2f} / £{policy.minimax_monthly_pence / 100:.2f}")
     console.print(f"OpenRtr  £{or_m / 100:.2f} / £{policy.get_provider_monthly_budget('openrouter') / 100:.2f}")
     console.print(f"Global   £{gl_m / 100:.2f} / £{policy.global_monthly_pence / 100:.2f}\n")
+
+    if model:
+        console.print(f"OpenRouter model: {model}")
+        if price is not None:
+            console.print(
+                f"OpenRouter pricing: ${price.input_cost_per_1m} input / "
+                f"${price.output_cost_per_1m} output per 1M tokens (configured)"
+            )
+        else:
+            console.print(
+                f"[red]No pricing configured for '{model}' — SURVIVOR routing will fail closed.[/red] "
+                "Set SURVIVOR_OPENROUTER_PRICING_MAP=\"<model>:<input_usd_per_1m>,<output_usd_per_1m>\"."
+            )
 
 
 @app.command(name="survivor-paper-status")
@@ -1614,11 +1649,63 @@ def survivor_run_once_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Scan + research + risk, but NO paper execution."),
 ):
     """Run exactly ONE complete autonomous PAPER cycle."""
-    from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
+    _validate_openrouter_config()
 
-    config = {"survivor_dry_run": dry_run}
+    from tradingagents.survivor.autonomy.cycle import dry_run_enabled, run_survivor_cycle
+
+    # Explicit --dry-run wins; otherwise SURVIVOR_DRY_RUN (shell or .env) decides.
+    effective_dry_run = dry_run or dry_run_enabled({})
+
+    config = {"survivor_dry_run": effective_dry_run}
     report = run_survivor_cycle(config)
     console.print(report.render())
+    console.print(f"Model used: {os.environ.get('SURVIVOR_OPENROUTER_MODEL', '(default role routes)')}")
+    console.print(
+        f"Dry run: {'ENABLED — zero paper executions' if effective_dry_run else 'disabled (paper executions allowed)'}"
+    )
+    console.print(
+        f"Trade proposed: {'yes' if report.trade_proposals else 'no'} "
+        f"({report.approved} approved / {report.rejected} rejected)"
+    )
+    if effective_dry_run and report.approved:
+        console.print("Execution blocked by dry run: yes — risk-approved proposals were NOT executed")
+    console.print(f"Estimated AI cost: £{report.ai_cost_pence / 100:.2f}")
+
+
+def _validate_openrouter_config() -> None:
+    """Fail clearly BEFORE a cycle when the configured OpenRouter route is unusable.
+
+    Never prints the key itself — only presence/placeholder state."""
+    model = (
+        os.environ.get("SURVIVOR_OPENROUTER_DEFAULT_MODEL", "").strip()
+        or os.environ.get("SURVIVOR_OPENROUTER_MODEL", "").strip()
+    )
+    if not model:
+        return  # operator runs the default role routes; nothing to validate
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not key:
+        console.print(
+            "[red]SURVIVOR_OPENROUTER_MODEL is set but OPENROUTER_API_KEY is missing.[/red]\n"
+            "Set it in .env (see .env.example) or export it, then retry."
+        )
+        raise typer.Exit(code=1)
+    if key == "PASTE_REAL_OPENROUTER_KEY_HERE":
+        console.print(
+            "[red]OPENROUTER_API_KEY still contains the placeholder from .env.[/red]\n"
+            "Paste your real OpenRouter key (sk-or-v1-…) into .env, line 13."
+        )
+        raise typer.Exit(code=1)
+    from tradingagents.llm_clients.pricing import (
+        register_openrouter_env_pricing,
+        register_openrouter_env_pricing_map,
+    )
+
+    try:
+        register_openrouter_env_pricing()
+        register_openrouter_env_pricing_map()
+    except ValueError as exc:
+        console.print(f"[red]Malformed OpenRouter pricing configuration: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
 
 
 @app.command(name="survivor-daemon")
@@ -1874,3 +1961,22 @@ def survivor_backup_verify_cmd(
 
 if __name__ == "__main__":
     app()
+
+
+# --- Standalone SURVIVOR console scripts ---------------------------------------
+# Registered in pyproject.toml [project.scripts] so the documented commands
+# work as top-level commands (`survivor-run-once`, `survivor-budget`). They
+# reuse the EXACT same Typer command functions as `tradingagents <cmd>` —
+# no trading logic, risk limits, or autonomy semantics are duplicated here.
+
+survivor_run_once = typer.Typer(
+    add_completion=False,
+    help="Run exactly ONE complete autonomous SURVIVOR PAPER cycle.",
+)
+survivor_run_once.command(name="survivor-run-once")(survivor_run_once_cmd)
+
+survivor_budget = typer.Typer(
+    add_completion=False,
+    help="Display SURVIVOR AI budget usage, provider pricing, and hard limits.",
+)
+survivor_budget.command(name="survivor-budget")(survivor_budget_cmd)

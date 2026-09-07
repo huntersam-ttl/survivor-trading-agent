@@ -62,6 +62,11 @@ def invoke_structured_or_freetext(
     prompt: Any,
     render: Callable[[T], str],
     agent_name: str,
+    *,
+    schema: type[T] | None = None,
+    repair_prompt: Any | None = None,
+    fail_on_structured_error: bool = False,
+    on_structured_result: Callable[[T], None] | None = None,
 ) -> str:
     """Run the structured call and render to markdown; fall back to free-text on any failure.
 
@@ -78,8 +83,41 @@ def invoke_structured_or_freetext(
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
+            if schema is not None:
+                result = schema.model_validate(result)
+            if on_structured_result is not None:
+                on_structured_result(result)
             return render(result)
         except Exception as exc:
+            if repair_prompt is not None:
+                repair_instruction = repair_prompt
+                if schema is not None and hasattr(exc, "errors"):
+                    failed_fields = []
+                    for error in exc.errors():
+                        location = ".".join(str(part) for part in error.get("loc", ()))
+                        if location and location not in failed_fields:
+                            failed_fields.append(location)
+                    if failed_fields:
+                        repair_instruction = (
+                            f"{repair_prompt}\n\nThe previous object is invalid.\n"
+                            "Validation failures:\n"
+                            + "\n".join(f"- {field}" for field in failed_fields)
+                            + "\nReturn the complete object again with ALL required fields."
+                        )
+                try:
+                    repaired = structured_llm.invoke(repair_instruction)
+                    if repaired is None:
+                        raise ValueError("structured repair returned no parsed result")
+                    if schema is not None:
+                        repaired = schema.model_validate(repaired)
+                    if on_structured_result is not None:
+                        on_structured_result(repaired)
+                    return render(repaired)
+                except Exception as repair_exc:
+                    if fail_on_structured_error:
+                        raise ValueError(
+                            f"{agent_name}: structured output and one repair were invalid"
+                        ) from repair_exc
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
                 agent_name, exc,

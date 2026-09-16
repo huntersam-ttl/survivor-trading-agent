@@ -7,6 +7,7 @@ Safety guarantees (enforced here and mirrored by the underlying SURVIVOR seams):
 * Read-only state endpoints (health/status/budget/performance/positions).
 * POST /v1/run/dry and /v1/run/paper delegate to the single tested cycle
   entrypoint ``run_survivor_cycle`` - no trading logic is duplicated.
+* GET /v1/recovery-preflight performs bounded read-only market probes.
 * POST /v1/halt writes the standard PAPER-autonomy HALT file. There is NO
   /v1/resume and NO auto-clear: HALT can only be lifted by an operator editing
   the filesystem, and nothing here can enable live trading.
@@ -104,6 +105,7 @@ class SurvivorHandlers:
         from tradingagents.survivor.autonomy import halt as halt_mod
         from tradingagents.survivor.autonomy.state import RuntimeState
         from tradingagents.survivor.execution.paper_broker import PaperBroker
+        from tradingagents.survivor.ops.health import heartbeat_read, watchdog_status
         from tradingagents.survivor.policy import SurvivorPolicy
         from tradingagents.survivor.risk.limits import risk_limits_from_env
 
@@ -114,9 +116,13 @@ class SurvivorHandlers:
         usage = inj.usage_ledger or InferenceUsageLedger()
         paper = broker.status()
         last = state.last_cycle()
+        heartbeat = heartbeat_read()
+        watchdog = watchdog_status(state)
         return {
             "mode": paper["mode"],
             "halted": halt_mod.is_halted(),
+            "heartbeat": heartbeat,
+            "watchdog": watchdog,
             "survivor_enabled": bool(is_survivor_enabled()),
             "cycle_count": state.cycle_count(),
             "last_cycle": last,
@@ -140,6 +146,23 @@ class SurvivorHandlers:
                 "monthly_limit_pence": policy.global_monthly_pence,
             },
         }
+
+    def recovery_preflight(self) -> dict:
+        from tradingagents.survivor.autonomy.state import RuntimeState
+        from tradingagents.survivor.execution.paper_broker import PaperBroker
+        from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
+        from tradingagents.survivor.ops.health import recovery_preflight
+        from tradingagents.survivor.risk.limits import risk_limits_from_env
+
+        inj = self.inject
+        adapter = inj.adapter or PolymarketAdapter()
+        broker = inj.broker or PaperBroker(limits=inj.settings or risk_limits_from_env())
+        return recovery_preflight(
+            runtime_state=inj.runtime_state or RuntimeState(),
+            adapter=adapter,
+            paper_status=broker.status(),
+            heartbeat_path=(inj.config_overrides or {}).get("_heartbeat_path"),
+        )
 
     def budget(self) -> dict:
         from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
@@ -262,6 +285,7 @@ class JarvisApp:
         ("GET", "/v1/performance"): "performance",
         ("GET", "/v1/positions"): "positions",
         ("GET", "/v1/signals"): "signals",
+        ("GET", "/v1/recovery-preflight"): "recovery_preflight",
         ("POST", "/v1/run/dry"): "run_dry",
         ("POST", "/v1/run/paper"): "run_paper",
         ("POST", "/v1/halt"): "halt",

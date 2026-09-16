@@ -27,7 +27,15 @@ from tradingagents.survivor.ops.attribution import (
     model_attribution,
 )
 from tradingagents.survivor.ops.budget import spend_alerts
-from tradingagents.survivor.ops.health import preflight_check, watchdog_record, watchdog_status
+from tradingagents.survivor.ops.health import (
+    heartbeat_read,
+    market_data_probe,
+    preflight_check,
+    record_market_probe,
+    recovery_preflight,
+    watchdog_record,
+    watchdog_status,
+)
 from tradingagents.survivor.ops.selfcheck import security_selfcheck
 from tradingagents.survivor.ops.snapshots import daily_snapshot, weekly_snapshot
 from tradingagents.survivor.policy import SurvivorPolicy
@@ -312,6 +320,7 @@ def test_daemon_does_not_auto_resume_halt(tmp_path, monkeypatch):
             {"survivor_autonomy_enabled": True},
             adapter=FakeMarketAdapter([make_snapshot()]),
             paper_ledger_path=str(tmp_path / "paper.db"),
+            runtime_state=RuntimeState(db_path=str(tmp_path / "runtime.db")),
         )
 
     for _ in range(3):
@@ -342,9 +351,10 @@ def test_watchdog_halts_after_threshold(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_heartbeat_written_atomically(tmp_path):
+def test_heartbeat_written_atomically(tmp_path, monkeypatch):
     import json
 
+    monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
     path = str(tmp_path / "hb" / "heartbeat.json")
     written = ops.heartbeat_write(
         trial_id="t1", pid=12345, mode="PAPER",
@@ -358,6 +368,66 @@ def test_heartbeat_written_atomically(tmp_path):
     assert data["mode"] == "PAPER" and data["halt_state"] == "CLEAR"
     leftovers = [f for f in os.listdir(os.path.dirname(path)) if f.startswith(".heartbeat")]
     assert leftovers == []  # atomic rename, no tmp litter
+
+
+@pytest.mark.unit
+def test_heartbeat_derives_halted_from_authoritative_file(tmp_path, monkeypatch):
+    path = str(tmp_path / "heartbeat.json")
+    halt_path = str(tmp_path / "HALT")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    ops.heartbeat_write(
+        trial_id="t1", pid=1, mode="PAPER", last_cycle_status="ACTIVE",
+        halt_state="CLEAR", heartbeat_path=path,
+    )
+    halt_mod.set_halt(halt_path)
+    assert heartbeat_read(path)["halt_state"] == "HALTED"
+    assert heartbeat_read(path)["consistent"] is False
+    ops.heartbeat_write(
+        trial_id="t1", pid=1, mode="PAPER", last_cycle_status="HALTED",
+        halt_state="CLEAR", heartbeat_path=path,
+    )
+    assert heartbeat_read(path)["consistent"] is True
+
+
+@pytest.mark.unit
+def test_successful_market_probes_preserve_history_and_reset_active(tmp_path):
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    state.set_watchdog("consecutive_market_failures", 31)
+    state.set_watchdog("historical_consecutive_market_failures", 31)
+    for _ in range(3):
+        result = record_market_probe(state, {"fresh": True, "schema_valid": True})
+    assert result["active_market_failure_count"] == 0
+    assert result["historical_consecutive_failures"] == 31
+    assert result["successful_probe_streak"] == 3
+
+
+@pytest.mark.unit
+def test_failed_market_probe_does_not_recover_counter(tmp_path):
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    state.set_watchdog("consecutive_market_failures", 31)
+    result = record_market_probe(state, {"fresh": False, "schema_valid": False})
+    assert result["active_market_failure_count"] == 32
+    assert result["historical_consecutive_failures"] == 32
+
+
+@pytest.mark.unit
+def test_recovery_preflight_is_deterministic_and_read_only(tmp_path, monkeypatch):
+    halt_path = str(tmp_path / "HALT")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    state.set_watchdog("consecutive_market_failures", 31)
+    adapter = FakeMarketAdapter([make_snapshot()])
+    before = watchdog_status(state)
+    result = recovery_preflight(
+        runtime_state=state, adapter=adapter,
+        paper_status={"mode": "PAPER ONLY", "open_positions": 0, "trading_state": "ACTIVE"},
+        heartbeat_path=str(tmp_path / "missing-heartbeat.json"),
+    )
+    assert result["safe_to_recover"] is False
+    assert result["current_market_health"] == "HEALTHY"
+    assert result["active_market_failure_count"] == 31
+    assert len(result["probes"]) == 3
+    assert watchdog_status(state) == before
 
 
 # --- 10,000-cycle deterministic synthetic soak -----------------------------------

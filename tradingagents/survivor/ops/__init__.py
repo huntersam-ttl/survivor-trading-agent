@@ -9,8 +9,12 @@ from tradingagents.survivor.ops.attribution import (
 from tradingagents.survivor.ops.backup import backup_survivor, verify_backup
 from tradingagents.survivor.ops.health import (
     HealthReport,
+    heartbeat_read,
     heartbeat_write,
+    market_data_probe,
     preflight_check,
+    record_market_probe,
+    recovery_preflight,
     watchdog_record,
     watchdog_status,
 )
@@ -27,8 +31,10 @@ from tradingagents.survivor.ops.trial import (
 __all__ = [
     "HealthReport", "JsonRotateLogger", "TrialConfig", "TrialManager",
     "backup_survivor", "cost_efficiency_metrics", "daily_snapshot",
-    "equity_curve", "failure_analytics", "heartbeat_write", "model_attribution",
+    "equity_curve", "failure_analytics", "heartbeat_read", "heartbeat_write",
+    "market_data_probe", "model_attribution",
     "persist_snapshot", "preflight_check", "recover_interrupted_cycles",
-    "redact_secrets", "security_selfcheck", "trial_completion", "verify_backup",
+    "record_market_probe", "recovery_preflight", "redact_secrets",
+    "security_selfcheck", "trial_completion", "verify_backup",
     "watchdog_record", "watchdog_status", "weekly_snapshot",
 ]

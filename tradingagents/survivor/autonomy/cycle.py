@@ -787,19 +787,22 @@ def _run_cycle_body(
     report.status = "DRY_RUN" if dry_run_enabled(config) else "ACTIVE"
 
     # Phase 5: watchdog, heartbeat, AI spend alerts (operations, no self-tuning)
-    from tradingagents.survivor.ops.health import heartbeat_write, watchdog_record
+    from tradingagents.survivor.ops.health import heartbeat_write, record_market_probe, watchdog_record
 
     watchdog_record(state, "consecutive_cycle_failures", success=report.status in ("ACTIVE", "DRY_RUN"))
-    if report.candidate_failures:
-        for _failure in report.candidate_failures:
-            watchdog_record(state, "consecutive_market_failures", success=False, halt_threshold=10)
-    else:
-        watchdog_record(state, "consecutive_market_failures", success=True, halt_threshold=10)
+    # Candidate/research failures are not market-data failures. Only the
+    # deterministic scan result updates the market watchdog; three consecutive
+    # valid scans reset the active counter while preserving its historical peak.
+    record_market_probe(state, {
+        "fresh": report.markets_discovered > 0 and report.passed_filters >= 0,
+        "schema_valid": report.markets_discovered > 0,
+    })
     heartbeat_write(
         trial_id=trial_id, pid=os.getpid(),
         mode="DRY_RUN" if dry_run_enabled(config) else "PAPER",
         last_cycle_id=cycle_id, last_cycle_status=report.status,
         halt_state="HALTED" if halt_mod.is_halted(halt_path) else "CLEAR",
+        halt_path=halt_path,
         heartbeat_path=config.get("_heartbeat_path"),
     )
     # AI spend alerts at 50/75/90/100% of daily budget (100% blocks via preflight)

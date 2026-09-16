@@ -136,6 +136,136 @@ def watchdog_status(runtime_state) -> dict:
     return runtime_state.get_watchdog_all()
 
 
+# --- bounded market recovery --------------------------------------------------
+
+def market_data_probe(adapter, *, max_age_seconds: float = 300.0) -> dict:
+    """Run one bounded, read-only market-data probe.
+
+    The probe validates provider response shape through the existing adapter's
+    normalizer. It does not rank, research, or execute anything. When a
+    provider does not supply a source timestamp, the observation time is used
+    explicitly as the transport timestamp rather than inventing provider age.
+    """
+    started = time.monotonic()
+    observed_at = datetime.now(timezone.utc)
+    provider = str(getattr(adapter, "provider", "unknown"))
+    try:
+        raw = adapter.list_markets(limit=100)
+        rows = raw if isinstance(raw, list) else []
+        normalized = []
+        for item in rows:
+            snapshot = adapter.normalize(item) if hasattr(adapter, "normalize") else None
+            if snapshot is not None:
+                normalized.append(snapshot)
+        timestamps = [
+            getattr(item, "source_timestamp_utc", None)
+            or getattr(item, "timestamp_utc", None)
+            for item in normalized
+        ]
+        timestamps = [value for value in timestamps if value]
+        data_timestamp = max(timestamps) if timestamps else observed_at.isoformat()
+        try:
+            data_age = max(0.0, (observed_at - datetime.fromisoformat(
+                data_timestamp.replace("Z", "+00:00"))).total_seconds())
+        except (AttributeError, TypeError, ValueError):
+            data_age = 0.0 if timestamps == [] else None
+        schema_valid = bool(rows) and len(normalized) == len(rows)
+        fresh = schema_valid and data_age is not None and data_age <= max_age_seconds
+        return {
+            "timestamp": observed_at.isoformat(),
+            "provider": provider,
+            "response_status": "OK",
+            "data_timestamp": data_timestamp,
+            "candidate_count": len(normalized),
+            "schema_valid": schema_valid,
+            "fresh": fresh,
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - probe reports provider failure
+        return {
+            "timestamp": observed_at.isoformat(),
+            "provider": provider,
+            "response_status": "ERROR",
+            "data_timestamp": None,
+            "candidate_count": 0,
+            "schema_valid": False,
+            "fresh": False,
+            "latency_ms": round((time.monotonic() - started) * 1000, 2),
+            "error": str(exc)[:200],
+        }
+
+
+def record_market_probe(runtime_state, probe: dict, *, recovery_successes: int = 3) -> dict:
+    """Record current probe state without erasing historical failure evidence."""
+    counters = watchdog_status(runtime_state)
+    active = int(counters.get("consecutive_market_failures", 0))
+    historical = max(
+        int(counters.get("historical_consecutive_market_failures", 0)), active,
+    )
+    streak = int(counters.get("market_probe_success_streak", 0))
+    if probe.get("fresh") and probe.get("schema_valid"):
+        streak += 1
+        if streak >= recovery_successes:
+            active = 0
+    else:
+        streak = 0
+        active += 1
+        historical = max(historical, active)
+    runtime_state.set_watchdog("consecutive_market_failures", active)
+    runtime_state.set_watchdog("historical_consecutive_market_failures", historical)
+    runtime_state.set_watchdog("market_probe_success_streak", streak)
+    return {
+        "active_market_failure_count": active,
+        "historical_consecutive_failures": historical,
+        "successful_probe_streak": streak,
+    }
+
+
+def recovery_preflight(
+    *,
+    runtime_state,
+    adapter,
+    paper_status: dict,
+    heartbeat_path: str | None = None,
+    probe_count: int = 3,
+    max_age_seconds: float = 300.0,
+) -> dict:
+    """Read-only recovery gate over fresh market probes and paper invariants."""
+    probes = [market_data_probe(adapter, max_age_seconds=max_age_seconds)
+              for _ in range(max(1, min(probe_count, 3)))]
+    counters = watchdog_status(runtime_state)
+    halted = is_halted()
+    heartbeat = heartbeat_read(heartbeat_path)
+    market_healthy = all(p["fresh"] and p["schema_valid"] for p in probes)
+    paper_mode = str(paper_status.get("mode", "")) in {"PAPER", "PAPER ONLY", "PAPER_ONLY"}
+    positions = int(paper_status.get("open_positions", 0) or 0)
+    risk_breach = str(paper_status.get("trading_state", "ACTIVE")) not in {"ACTIVE", "PAPER"}
+    reasons = []
+    if not paper_mode: reasons.append("paper_mode_required")
+    if not market_healthy: reasons.append("current_market_health_not_healthy")
+    if positions: reasons.append("open_positions_present")
+    if risk_breach: reasons.append("risk_breach_or_paper_halt")
+    if not heartbeat.get("present") or not heartbeat.get("consistent"):
+        reasons.append("heartbeat_inconsistent")
+    return {
+        "safe_to_recover": not reasons,
+        "reasons": reasons,
+        "paper_mode": paper_mode,
+        "halt_file_present": halted,
+        "current_market_health": "HEALTHY" if market_healthy else "DEGRADED",
+        "active_market_failure_count": int(counters.get("consecutive_market_failures", 0)),
+        "historical_consecutive_failures": int(counters.get("historical_consecutive_market_failures", counters.get("consecutive_market_failures", 0))),
+        "provider_health": {str(getattr(adapter, "provider", "unknown")): "READY" if market_healthy else "DEGRADED"},
+        "schema_health": "HEALTHY" if all(p["schema_valid"] for p in probes) else "DEGRADED",
+        "positions": positions,
+        "risk_breach": risk_breach,
+        "live_broker_available": False,
+        "heartbeat_consistent": bool(heartbeat.get("present") and heartbeat.get("consistent")),
+        "probes": probes,
+    }
+
+
 # --- heartbeat ------------------------------------------------------------------
 
 def heartbeat_write(
@@ -146,6 +276,7 @@ def heartbeat_write(
     last_cycle_id: str = "",
     last_cycle_status: str = "",
     halt_state: str = "CLEAR",
+    halt_path: str | None = None,
     heartbeat_path: str | None = None,
 ) -> str:
     """Write heartbeat.json atomically (tmp file + rename). No secrets."""
@@ -158,13 +289,34 @@ def heartbeat_write(
         "mode": mode,
         "last_cycle_id": last_cycle_id,
         "last_cycle_status": last_cycle_status,
-        "halt_state": halt_state,
+        # The filesystem kill switch is authoritative; callers cannot write
+        # CLEAR while HALT exists.
+        "halt_state": "HALTED" if is_halted(halt_path) else halt_state,
     }
     fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".heartbeat")
     with os.fdopen(fd, "w") as fh:
         json.dump(payload, fh, sort_keys=True)
     os.replace(tmp_path, path)  # atomic on POSIX
     return path
+
+
+def heartbeat_read(heartbeat_path: str | None = None) -> dict:
+    """Read heartbeat with derived HALT state; never trusts stale CLEAR."""
+    path = heartbeat_path or HEARTBEAT_PATH
+    if not os.path.exists(path):
+        return {"present": False, "consistent": not is_halted(), "halt_state": "HALTED" if is_halted() else "CLEAR"}
+    try:
+        with open(path) as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return {"present": True, "consistent": False, "halt_state": "HALTED" if is_halted() else "UNKNOWN"}
+    derived = "HALTED" if is_halted() else str(payload.get("halt_state", "CLEAR"))
+    return {
+        **payload,
+        "halt_state": derived,
+        "consistent": str(payload.get("halt_state", "")) == derived,
+        "present": True,
+    }
 
 
 def heartbeat_age_seconds(heartbeat_path: str | None = None) -> float | None:

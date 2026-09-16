@@ -64,6 +64,20 @@ def test_probability_bounds_are_enforced_and_structured_render_is_canonical():
     assert "P(YES)" not in render_pm_decision(_decision())
 
 
+def test_singleton_text_evidence_from_provider_is_normalized_without_invention():
+    decision = PredictionMarketDecision(
+        rating="Hold",
+        executive_summary="Evidence is limited.",
+        investment_thesis="The available evidence does not justify a trade.",
+        probability_yes=0.5,
+        confidence=0.5,
+        key_evidence="one observed fact",
+        key_risks="one unresolved risk",
+    )
+    assert decision.key_evidence == ["one observed fact"]
+    assert decision.key_risks == ["one unresolved risk"]
+
+
 def test_plain_text_remains_legacy_fallback():
     plain = MagicMock()
     plain.invoke.return_value = MagicMock(content="**Rating**: Hold\nP(YES): 55%")

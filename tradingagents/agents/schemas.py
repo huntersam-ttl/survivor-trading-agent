@@ -259,6 +259,20 @@ class PredictionMarketDecision(PortfolioDecision):
         description="One or more concrete uncertainties or risks to the estimate.",
     )
 
+    @field_validator("key_evidence", "key_risks", mode="before")
+    @classmethod
+    def _single_item_text_to_list(cls, value):
+        """Normalize a provider's valid singleton text without inventing evidence.
+
+        Some OpenRouter-compatible models serialize a one-item list as a plain
+        string even when JSON mode is requested. A scalar is still required to
+        be non-empty and remains exactly one evidence/risk item; missing or
+        malformed values continue to fail Pydantic validation.
+        """
+        if isinstance(value, str) and value.strip():
+            return [value]
+        return value
+
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
     """Render a PortfolioDecision back to the markdown shape the rest of the system expects.

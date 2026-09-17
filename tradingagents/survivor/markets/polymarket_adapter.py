@@ -139,6 +139,32 @@ class PolymarketAdapter(MarketAdapter):
                 return ResolutionStatus.NO if raw.get("closed") else ResolutionStatus.UNRESOLVED
         return ResolutionStatus.UNKNOWN
 
+    def get_resolved_outcome(self, market_id: str):
+        """Return an outcome only when the provider exposes explicit resolution data.
+
+        Closed markets alone are not treated as resolved: expiry and settlement
+        are distinct, and this method fails closed when Gamma omits an explicit
+        resolution timestamp/outcome.
+        """
+        for raw in self.list_markets(limit=100):
+            if str(raw.get("id")) != market_id:
+                continue
+            if raw.get("resolved") is not True:
+                return None
+            prices = gamma._parse_json_list(raw.get("outcomePrices"))
+            try:
+                values = [float(v) for v in prices]
+            except (TypeError, ValueError):
+                return None
+            if len(values) != 2 or values not in ([1.0, 0.0], [0.0, 1.0]):
+                return None
+            resolved_at = raw.get("resolvedAt") or raw.get("resolutionTime") or raw.get("closedTime")
+            resolved_at = _iso_to_iso(resolved_at)
+            if not resolved_at:
+                return None
+            return (1.0 if values[0] == 1.0 else 0.0, resolved_at, values[0])
+        return None
+
 
 def MoneyAmountUSD(minor_units: int):
     """Explicit USD money constructor (documents provider currency)."""

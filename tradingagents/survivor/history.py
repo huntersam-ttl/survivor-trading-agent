@@ -173,13 +173,16 @@ class HistoryStore:
 
     def reconcile(self, adapter, limit: int = 100) -> int:
         """Bounded read-only outcome reconciliation using provider resolution state."""
+        resolver = getattr(adapter, "get_resolved_outcome", None)
+        if resolver is None:
+            return 0
         resolved = 0
         for market_id in self.unresolved_market_ids(limit):
-            state = adapter.get_resolution_status(market_id)
-            value = {"YES": 1.0, "NO": 0.0}.get(getattr(state, "value", str(state)))
-            if value is None:
+            outcome = resolver(market_id)
+            if not outcome:
                 continue
-            if self.record_outcome(market_id, datetime.now(timezone.utc).isoformat(), value, value, adapter.provider):
+            value, resolved_at, final_value = outcome
+            if self.record_outcome(market_id, resolved_at, value, final_value, adapter.provider):
                 resolved += 1
         return resolved
 

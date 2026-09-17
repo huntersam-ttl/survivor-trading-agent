@@ -1540,6 +1540,27 @@ def survivor_scan_cmd():
         )
 
 
+@app.command(name="survivor-history")
+def survivor_history_cmd():
+    """Read-only history-capture statistics; never runs a cycle or trade."""
+    from tradingagents.survivor.history import HistoryStore
+
+    stats = HistoryStore().stats()
+    console.print(json.dumps(stats, sort_keys=True))
+
+
+@app.command(name="survivor-history-reconcile")
+def survivor_history_reconcile_cmd(limit: int = 100):
+    """Bounded read-only reconciliation of observed provider outcomes."""
+    from tradingagents.survivor.history import HistoryStore
+    from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
+
+    if limit <= 0 or limit > 1000:
+        raise typer.BadParameter("limit must be between 1 and 1000")
+    count = HistoryStore().reconcile(PolymarketAdapter(), limit=limit)
+    console.print(json.dumps({"resolved": count, "stats": HistoryStore().stats()}, sort_keys=True))
+
+
 @app.command(name="survivor-experiments")
 def survivor_experiments_cmd():
     """List learning-engine experiment proposals (read-only)."""

@@ -27,6 +27,9 @@ class ScanResult:
     candidates: list[Candidate] = field(default_factory=list)
     ranked: list[Candidate] = field(default_factory=list)
     top: list[Candidate] = field(default_factory=list)
+    # Raw/normalized observations retained for the optional read-only history
+    # writer. This does not participate in ranking or execution decisions.
+    observed: list[tuple[dict, object | None, ScanRejection | None]] = field(default_factory=list)
 
 
 class MarketScanner:
@@ -62,6 +65,7 @@ class MarketScanner:
             snapshot = self.adapter.normalize(raw) if hasattr(self.adapter, "normalize") else None
             if snapshot is None:
                 result.rejected.append(("<unnormalizable>", ScanRejection.UNSUPPORTED_MARKET_TYPE))
+                result.observed.append((raw, None, ScanRejection.UNSUPPORTED_MARKET_TYPE))
                 continue
             result.normalized += 1
             reason = filter_market(
@@ -73,6 +77,7 @@ class MarketScanner:
                 result.rejected.append((snapshot.market_id, reason))
             else:
                 candidates.append(Candidate(snapshot=snapshot))
+            result.observed.append((raw, snapshot, reason))
 
         result.candidates = candidates[: self.max_candidates_per_cycle]
         result.ranked = rank_candidates(result.candidates, self.weights, now=current)

@@ -545,9 +545,10 @@ def _run_cycle_body(
         from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
 
         adapter = PolymarketAdapter()
+    scan_limits = scan_limits_from_env()
     scanner = MarketScanner(
         adapter,
-        limits=scan_limits_from_env(),
+        limits=scan_limits,
         max_candidates_per_cycle=_int_env("SURVIVOR_MAX_CANDIDATES_PER_CYCLE", 40),
         max_research_candidates_per_cycle=_int_env("SURVIVOR_MAX_RESEARCH_PER_CYCLE", 3),
     )
@@ -578,6 +579,25 @@ def _run_cycle_body(
     eval_store = EvaluationStore(db_path=config.get("_evaluation_db_path"))
     version, chash = strategy_identity({"min_edge_bps": limits.min_conservative_net_edge_bps})
     trial_id = config.get("_trial_id") or "no-trial"
+
+    # Best-effort historical capture is isolated from all decision and
+    # accounting paths. A database/disk failure is diagnostic only; it must
+    # never narrow, delay, or abort the PAPER cycle.
+    try:
+        from dataclasses import asdict
+        from tradingagents.survivor.history import HistoryStore
+
+        HistoryStore(db_path=config.get("_history_db_path")).record_scan(
+            cycle_id,
+            scan.observed,
+            thresholds=asdict(scan_limits),
+            strategy_version=version,
+            config_hash=chash,
+        )
+    except Exception as exc:  # noqa: BLE001 - history is strictly best-effort
+        report.details["history_capture"] = {"status": "ERROR", "reason": str(exc)}
+    else:
+        report.details["history_capture"] = {"status": "OK", "snapshots": len(scan.observed)}
 
     # Jarvis World Intelligence (optional, fail-open): fetch ONE bounded digest
     # before the research/decision cycle. Any failure yields None and the

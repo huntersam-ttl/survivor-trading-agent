@@ -32,6 +32,7 @@ from tradingagents.survivor.ops.health import (
     market_data_probe,
     preflight_check,
     record_market_probe,
+    reconcile_recovery_state,
     recovery_preflight,
     watchdog_record,
     watchdog_status,
@@ -428,6 +429,37 @@ def test_recovery_preflight_is_deterministic_and_read_only(tmp_path, monkeypatch
     assert result["active_market_failure_count"] == 31
     assert len(result["probes"]) == 3
     assert watchdog_status(state) == before
+
+
+@pytest.mark.unit
+def test_recovery_reconcile_marks_stale_heartbeat_and_recovers_active_count(tmp_path, monkeypatch):
+    halt_path = str(tmp_path / "HALT")
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    halt_mod.set_halt(halt_path)
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    state.set_watchdog("consecutive_market_failures", 31)
+    state.set_watchdog("historical_consecutive_market_failures", 31)
+    ops.heartbeat_write(
+        trial_id="old", pid=27642, mode="PAPER", last_cycle_id="c1",
+        last_cycle_status="ACTIVE", halt_state="CLEAR", halt_path=halt_path,
+        heartbeat_path=heartbeat_path,
+    )
+
+    result = reconcile_recovery_state(
+        runtime_state=state,
+        adapter=FakeMarketAdapter([make_snapshot()]),
+        heartbeat_path=heartbeat_path,
+        halt_path=halt_path,
+    )
+
+    assert result["counter_reconciliation"]["active_market_failure_count"] == 0
+    assert result["counter_reconciliation"]["historical_consecutive_failures"] == 31
+    assert result["heartbeat"]["halt_state"] == "HALTED"
+    assert result["heartbeat"]["consistent"] is True
+    assert result["heartbeat"]["pid"] == 0
+    assert result["heartbeat"]["supervisor_state"] == "STALE"
+    assert halt_mod.is_halted(halt_path)
 
 
 # --- 10,000-cycle deterministic synthetic soak -----------------------------------

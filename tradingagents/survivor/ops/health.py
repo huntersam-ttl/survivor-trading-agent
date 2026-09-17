@@ -266,6 +266,52 @@ def recovery_preflight(
     }
 
 
+def reconcile_recovery_state(
+    *,
+    runtime_state,
+    adapter,
+    heartbeat_path: str | None = None,
+    halt_path: str | None = None,
+    probe_count: int = 3,
+    max_age_seconds: float = 300.0,
+) -> dict:
+    """Reconcile bounded recovery evidence without resuming autonomy.
+
+    This is intentionally separate from the read-only preflight gate. It may
+    reset only the active market-failure streak after bounded fresh probes,
+    preserves the historical peak, and marks a dead supervisor heartbeat stale
+    while the filesystem HALT remains authoritative.
+    """
+    probes = [market_data_probe(adapter, max_age_seconds=max_age_seconds)
+              for _ in range(max(1, min(probe_count, 3)))]
+    counter = {"active_market_failure_count": 0,
+               "historical_consecutive_failures": 0,
+               "successful_probe_streak": 0}
+    for probe in probes:
+        counter = record_market_probe(runtime_state, probe)
+
+    heartbeat = heartbeat_read(heartbeat_path)
+    if is_halted(halt_path):
+        heartbeat_write(
+            trial_id=str(heartbeat.get("trial_id") or "no-trial"),
+            pid=0,
+            mode=str(heartbeat.get("mode") or "PAPER"),
+            last_cycle_id=str(heartbeat.get("last_cycle_id") or ""),
+            last_cycle_status="HALTED",
+            halt_state="HALTED",
+            halt_path=halt_path,
+            heartbeat_path=heartbeat_path,
+            supervisor_state="STALE",
+        )
+    return {
+        "halt_file_present": is_halted(halt_path),
+        "heartbeat": heartbeat_read(heartbeat_path),
+        "watchdog": watchdog_status(runtime_state),
+        "counter_reconciliation": counter,
+        "probes": probes,
+    }
+
+
 # --- heartbeat ------------------------------------------------------------------
 
 def heartbeat_write(
@@ -278,6 +324,7 @@ def heartbeat_write(
     halt_state: str = "CLEAR",
     halt_path: str | None = None,
     heartbeat_path: str | None = None,
+    supervisor_state: str | None = None,
 ) -> str:
     """Write heartbeat.json atomically (tmp file + rename). No secrets."""
     path = heartbeat_path or HEARTBEAT_PATH
@@ -292,6 +339,7 @@ def heartbeat_write(
         # The filesystem kill switch is authoritative; callers cannot write
         # CLEAR while HALT exists.
         "halt_state": "HALTED" if is_halted(halt_path) else halt_state,
+        "supervisor_state": supervisor_state or ("STALE" if pid <= 0 else "RUNNING"),
     }
     fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".heartbeat")
     with os.fdopen(fd, "w") as fh:

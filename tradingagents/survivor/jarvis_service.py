@@ -164,6 +164,24 @@ class SurvivorHandlers:
             heartbeat_path=(inj.config_overrides or {}).get("_heartbeat_path"),
         )
 
+    def recovery_reconcile(self) -> dict:
+        from tradingagents.survivor.autonomy.state import RuntimeState
+        from tradingagents.survivor.execution.paper_broker import PaperBroker
+        from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
+        from tradingagents.survivor.ops.health import reconcile_recovery_state
+        from tradingagents.survivor.risk.limits import risk_limits_from_env
+
+        inj = self.inject
+        adapter = inj.adapter or PolymarketAdapter()
+        broker = inj.broker or PaperBroker(limits=inj.settings or risk_limits_from_env())
+        overrides = inj.config_overrides or {}
+        return reconcile_recovery_state(
+            runtime_state=inj.runtime_state or RuntimeState(),
+            adapter=adapter,
+            heartbeat_path=overrides.get("_heartbeat_path"),
+            halt_path=overrides.get("_halt_path"),
+        )
+
     def budget(self) -> dict:
         from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
         from tradingagents.survivor.policy import SurvivorPolicy
@@ -286,6 +304,7 @@ class JarvisApp:
         ("GET", "/v1/positions"): "positions",
         ("GET", "/v1/signals"): "signals",
         ("GET", "/v1/recovery-preflight"): "recovery_preflight",
+        ("POST", "/v1/recovery-reconcile"): "recovery_reconcile",
         ("POST", "/v1/run/dry"): "run_dry",
         ("POST", "/v1/run/paper"): "run_paper",
         ("POST", "/v1/halt"): "halt",

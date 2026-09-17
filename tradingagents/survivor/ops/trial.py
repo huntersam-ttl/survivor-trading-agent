@@ -14,7 +14,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-TRIALS_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor", "trials")
+from tradingagents.survivor.paths import runtime_dir
+
+TRIALS_DIR = os.path.join(runtime_dir(), "trials")
 
 
 @dataclass(frozen=True)
@@ -213,4 +215,3 @@ def trial_completion(
         "resolved_predictions": resolved_predictions,
         "result": result,
     }
-

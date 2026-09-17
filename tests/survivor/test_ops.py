@@ -464,6 +464,28 @@ def test_recovery_reconcile_marks_stale_heartbeat_and_recovers_active_count(tmp_
 
 
 @pytest.mark.unit
+def test_default_survivor_runtime_never_touches_live_looking_heartbeat(tmp_path):
+    import json
+
+    live_path = tmp_path / "live-user-state" / "heartbeat.json"
+    live_path.parent.mkdir()
+    original = {
+        "pid": 45652, "mode": "DRY_RUN", "halt_state": "CLEAR",
+        "supervisor_state": "RUNNING", "last_cycle_id": "live-cycle",
+    }
+    live_path.write_text(json.dumps(original))
+
+    written = ops.heartbeat_write(
+        trial_id="test", pid=999, mode="DRY_RUN", last_cycle_id="test-cycle",
+        last_cycle_status="DRY_RUN", halt_state="CLEAR",
+    )
+
+    assert json.loads(live_path.read_text()) == original
+    assert written != str(live_path)
+    assert "survivor-runtime" in written
+
+
+@pytest.mark.unit
 def test_resume_transition_clears_halt_and_refreshes_stale_heartbeat(tmp_path, monkeypatch):
     halt_path = str(tmp_path / "HALT")
     heartbeat_path = str(tmp_path / "heartbeat.json")

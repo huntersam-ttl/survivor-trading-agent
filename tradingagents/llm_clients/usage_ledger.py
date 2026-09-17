@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from tradingagents.survivor.types import InferenceRecord
+from tradingagents.survivor.paths import runtime_dir
 
-_DEFAULT_DB_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor")
+_DEFAULT_DB_DIR = runtime_dir()
 _DEFAULT_DB_PATH = os.path.join(_DEFAULT_DB_DIR, "usage.db")
 
 

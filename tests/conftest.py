@@ -38,6 +38,33 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_survivor_runtime(tmp_path, monkeypatch):
+    """Keep every survivor default mutable path inside this test's temp root."""
+    root = tmp_path / "survivor-runtime"
+    monkeypatch.setenv("SURVIVOR_RUNTIME_DIR", str(root))
+
+    from tradingagents.llm_clients import usage_ledger
+    from tradingagents.survivor.autonomy import halt, lock, state
+    from tradingagents.survivor.evaluation import store
+    from tradingagents.survivor.execution import ledger
+    from tradingagents.survivor.ops import health, logging_utils, trial
+
+    monkeypatch.setattr(halt, "HALT_DIR", str(root))
+    monkeypatch.setattr(halt, "HALT_PATH", str(root / "HALT"))
+    monkeypatch.setattr(lock, "LOCK_DIR", str(root))
+    monkeypatch.setattr(lock, "LOCK_PATH", str(root / "cycle.lock"))
+    monkeypatch.setattr(state, "DEFAULT_RUNTIME_DB_PATH", str(root / "runtime.db"))
+    monkeypatch.setattr(ledger, "DEFAULT_PAPER_DB_PATH", str(root / "paper.db"))
+    monkeypatch.setattr(store, "DEFAULT_EVALUATION_DB_PATH", str(root / "evaluation.db"))
+    monkeypatch.setattr(usage_ledger, "_DEFAULT_DB_DIR", str(root))
+    monkeypatch.setattr(usage_ledger, "_DEFAULT_DB_PATH", str(root / "usage.db"))
+    monkeypatch.setattr(health, "SURVIVOR_DIR", str(root))
+    monkeypatch.setattr(health, "HEARTBEAT_PATH", str(root / "heartbeat.json"))
+    monkeypatch.setattr(trial, "TRIALS_DIR", str(root / "trials"))
+    monkeypatch.setattr(logging_utils, "LOGS_DIR", str(root / "logs"))
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config():
     """Reset the global dataflows config before and after each test.
 

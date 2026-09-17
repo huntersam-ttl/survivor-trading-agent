@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import os
 
-HALT_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor")
+from tradingagents.survivor.paths import runtime_dir
+
+HALT_DIR = runtime_dir()
 HALT_PATH = os.path.join(HALT_DIR, "HALT")
 
 

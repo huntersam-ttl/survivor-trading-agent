@@ -13,9 +13,10 @@ import uuid
 from datetime import datetime, timezone
 
 from tradingagents.survivor.evaluation.types import PredictionRecord, TradeOutcome
+from tradingagents.survivor.paths import runtime_dir
 
 DEFAULT_EVALUATION_DB_PATH = os.path.join(
-    os.path.expanduser("~"), ".tradingagents", "survivor", "evaluation.db"
+    runtime_dir(), "evaluation.db"
 )
 
 
@@ -247,5 +248,3 @@ class EvaluationStore:
                  strategy_version, config_hash, report_json),
             )
         return snapshot_id
-
-

@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import time
 
-LOCK_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor")
+from tradingagents.survivor.paths import runtime_dir
+
+LOCK_DIR = runtime_dir()
 LOCK_PATH = os.path.join(LOCK_DIR, "cycle.lock")
 
 

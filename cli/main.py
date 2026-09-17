@@ -1643,8 +1643,9 @@ def survivor_learning_report_cmd():
     )
 
     store = EvaluationStore()
-    usage = InferenceUsageLedger() if os.path.exists(
-        os.path.expanduser("~/.tradingagents/survivor/usage.db")) else None
+    from tradingagents.survivor.paths import runtime_dir
+    usage_path = os.path.join(runtime_dir(), "usage.db")
+    usage = InferenceUsageLedger() if os.path.exists(usage_path) else None
     records = build_learning_records(store, usage_ledger=usage)
     version, _ = ExperimentStore().current_version()
     report = generate_learning_report(records, current_version=version,
@@ -1752,7 +1753,8 @@ def survivor_performance_cmd(
     from tradingagents.survivor.execution.ledger import PaperLedger
 
     store = EvaluationStore()
-    paper_path = os.path.expanduser("~/.tradingagents/survivor/paper.db")
+    from tradingagents.survivor.paths import runtime_dir
+    paper_path = os.path.join(runtime_dir(), "paper.db")
     ledger = PaperLedger(db_path=paper_path) if os.path.exists(paper_path) else None
     try:
         report = evaluate_performance(store, paper_ledger_path=paper_path if ledger else None)
@@ -1820,7 +1822,8 @@ def survivor_trial_start_cmd(
     from tradingagents.survivor.ops.health import preflight_check
     from tradingagents.survivor.ops.trial import TrialManager
 
-    halt_file = os.path.join(os.path.expanduser("~/.tradingagents/survivor"), "HALT")
+    from tradingagents.survivor.paths import runtime_dir
+    halt_file = os.path.join(runtime_dir(), "HALT")
     if is_halted(halt_file):
         console.print("[red]HALT file present; trial start refused.[/red]")
         raise typer.Exit(code=1)
@@ -1926,7 +1929,8 @@ def survivor_health_cmd():
         watchdog_status,
     )
 
-    base = os.path.expanduser("~/.tradingagents/survivor")
+    from tradingagents.survivor.paths import runtime_dir
+    base = runtime_dir()
     health = preflight_check(survivor_dir=base, cycle_interval_seconds=900)
     console.print(health.render())
     try:

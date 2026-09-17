@@ -8,7 +8,9 @@ import logging.handlers
 import os
 import re
 
-LOGS_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor", "logs")
+from tradingagents.survivor.paths import runtime_dir
+
+LOGS_DIR = os.path.join(runtime_dir(), "logs")
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),

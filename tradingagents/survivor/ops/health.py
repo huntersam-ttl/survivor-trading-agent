@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 
 from tradingagents.survivor.autonomy.halt import is_halted, set_halt
 from tradingagents.survivor.markets.adapter import FORBIDDEN_METHODS
+from tradingagents.survivor.paths import runtime_dir
 
-SURVIVOR_DIR = os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor")
+SURVIVOR_DIR = runtime_dir()
 HEARTBEAT_PATH = os.path.join(SURVIVOR_DIR, "heartbeat.json")
 MIN_DISK_FREE_BYTES = 200 * 1024 * 1024  # 200 MB
 

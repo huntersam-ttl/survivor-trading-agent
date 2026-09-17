@@ -16,9 +16,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tradingagents.survivor.markets.types import MarketSnapshot
+from tradingagents.survivor.paths import runtime_dir
 
 DEFAULT_RUNTIME_DB_PATH = os.path.join(
-    os.path.expanduser("~"), ".tradingagents", "survivor", "runtime.db"
+    runtime_dir(), "runtime.db"
 )
 
 
@@ -209,4 +210,3 @@ class RuntimeState:
             self._watchdog_table(conn)
             rows = conn.execute("SELECT key, value FROM watchdog").fetchall()
         return {r["key"]: int(r["value"]) for r in rows}
-

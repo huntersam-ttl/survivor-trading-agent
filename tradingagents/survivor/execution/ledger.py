@@ -20,9 +20,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tradingagents.survivor.execution.portfolio import Portfolio
+from tradingagents.survivor.paths import runtime_dir
 
 DEFAULT_PAPER_DB_PATH = os.path.join(
-    os.path.expanduser("~"), ".tradingagents", "survivor", "paper.db"
+    runtime_dir(), "paper.db"
 )
 
 _COLUMNS = (
@@ -194,5 +195,3 @@ class PaperLedger:
                 raise LedgerCorruptionError(f"negative holdings at {event['event_id']}")
         portfolio.realized_pnl_today_pence = self.pnl_today()
         return portfolio
-
-

@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from tradingagents.survivor.execution.ledger import PaperLedger
+from tradingagents.survivor.paths import runtime_dir
 
 BACKUP_FILES = ("paper.db", "usage.db", "runtime.db", "evaluation.db")
 OPTIONAL_FILES = ("heartbeat.json",)
@@ -16,7 +17,7 @@ OPTIONAL_FILES = ("heartbeat.json",)
 def backup_survivor(survivor_dir: str | None = None, backup_root: str | None = None) -> str:
     """Copy survivor databases + trial config into a timestamped directory.
     Never includes .env / API keys / secrets (only whitelisted files)."""
-    base = survivor_dir or os.path.join(os.path.expanduser("~"), ".tradingagents", "survivor")
+    base = survivor_dir or runtime_dir()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     root = backup_root or os.path.join(base, "backups")
     dest = os.path.join(root, f"survivor_backup_{stamp}")

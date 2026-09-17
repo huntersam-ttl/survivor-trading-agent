@@ -16,7 +16,7 @@ def test_history_captures_normalized_filter_decision_and_is_idempotent(tmp_path)
     store = HistoryStore(tmp_path / "history.db")
     kwargs = {"thresholds": {"max_spread_bps": 500}, "strategy_version": "survivor-v1.0", "config_hash": "cfg"}
     assert store.record_scan("cycle-1", result.observed, **kwargs) == 1
-    assert store.record_scan("cycle-1", result.observed, **kwargs) == 1
+    assert store.record_scan("cycle-1", result.observed, **kwargs) == 0
     assert store.stats()["snapshot_count"] == 1
     row = sqlite3.connect(tmp_path / "history.db").execute(
         "select filter_result,rejection_reason,bid_bps,ask_bps,thresholds_json from market_snapshots"

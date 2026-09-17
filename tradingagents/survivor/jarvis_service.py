@@ -260,6 +260,11 @@ class SurvivorHandlers:
         )
         return build_signal_summary(scanner.scan())
 
+    def history(self) -> dict:
+        from tradingagents.survivor.history import HistoryStore
+
+        return HistoryStore(read_only=True, initialize=False).stats()
+
     def run_dry(self) -> dict:
         from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
 
@@ -303,6 +308,7 @@ class JarvisApp:
         ("GET", "/v1/performance"): "performance",
         ("GET", "/v1/positions"): "positions",
         ("GET", "/v1/signals"): "signals",
+        ("GET", "/v1/history"): "history",
         ("GET", "/v1/recovery-preflight"): "recovery_preflight",
         ("POST", "/v1/recovery-reconcile"): "recovery_reconcile",
         ("POST", "/v1/run/dry"): "run_dry",

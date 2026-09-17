@@ -73,6 +73,17 @@ class HistoryStore:
                     name TEXT PRIMARY KEY, count INTEGER NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cycle_summaries (
+                    cycle_id TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                    strategy_version TEXT NOT NULL, config_hash TEXT NOT NULL,
+                    discovered INTEGER NOT NULL, accepted INTEGER NOT NULL,
+                    rejected INTEGER NOT NULL, rejection_json TEXT NOT NULL,
+                    missing_bid INTEGER NOT NULL, missing_ask INTEGER NOT NULL,
+                    invalid_timestamp INTEGER NOT NULL, schema_errors INTEGER NOT NULL,
+                    duplicate_snapshots INTEGER NOT NULL
+                )
+            """)
 
     @staticmethod
     def _price_bps(raw: dict):
@@ -112,8 +123,10 @@ class HistoryStore:
         thresholds: dict, strategy_version: str, config_hash: str,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
+        observations = list(observations)
         rows = []
         quality = {"missing_bid": 0, "missing_ask": 0, "invalid_timestamp": 0, "schema_errors": 0}
+        reasons: dict[str, int] = {}
         for raw, snapshot, reason in observations:
             market_id = snapshot.market_id if snapshot else str(raw.get("id") or raw.get("market_id") or "<unnormalizable>")
             if snapshot is None:
@@ -137,6 +150,9 @@ class HistoryStore:
                 )
                 normalized = HistoryStore._json_snapshot(snapshot)
                 provider = snapshot.provider; question = snapshot.question
+            if reason is not None:
+                name = reason.value
+                reasons[name] = reasons.get(name, 0) + 1
             rows.append((cycle_id, market_id, now, question,
                          raw.get("conditionId") or raw.get("condition_id"),
                          raw.get("eventId") or raw.get("event_id"),
@@ -147,24 +163,59 @@ class HistoryStore:
                          reason.value if reason else None, json.dumps(thresholds, sort_keys=True),
                          strategy_version, config_hash))
         with self._connect() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM market_snapshots WHERE cycle_id = ?", (cycle_id,)).fetchone()[0]
             placeholders = ",".join("?" for _ in range(30))
             conn.executemany(
                 f"INSERT OR IGNORE INTO market_snapshots VALUES ({placeholders})", rows
             )
+            after = conn.execute("SELECT COUNT(*) FROM market_snapshots WHERE cycle_id = ?", (cycle_id,)).fetchone()[0]
+            inserted = max(0, after - before)
+            duplicate_count = max(0, len(rows) - inserted)
+            conn.execute(
+                "INSERT OR REPLACE INTO cycle_summaries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (cycle_id, now, strategy_version, config_hash, len(rows),
+                 sum(1 for _, _, reason in observations if reason is None),
+                 sum(reasons.values()), json.dumps(reasons, sort_keys=True),
+                 quality["missing_bid"], quality["missing_ask"], quality["invalid_timestamp"],
+                 quality["schema_errors"], duplicate_count),
+            )
+            quality["duplicate_snapshots"] = duplicate_count
             for name, count in quality.items():
                 conn.execute("INSERT INTO quality_counters(name,count) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET count=count+excluded.count", (name, count))
-        return len(rows)
+        return inserted
 
     def stats(self) -> dict:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*), COUNT(DISTINCT market_id), MIN(observed_at), MAX(observed_at) FROM market_snapshots").fetchone()
             resolved = conn.execute("SELECT COUNT(*) FROM market_outcomes").fetchone()[0]
+            counts = [r[0] for r in conn.execute("SELECT COUNT(*) FROM market_snapshots GROUP BY market_id")]
+            cycles = conn.execute("SELECT cycle_id,observed_at,discovered,accepted,rejected,rejection_json,missing_bid,missing_ask,invalid_timestamp,schema_errors,duplicate_snapshots FROM cycle_summaries ORDER BY observed_at").fetchall()
             total = row[0] or 0
             unresolved = max(0, (row[1] or 0) - resolved)
             quality = dict(conn.execute("SELECT name,count FROM quality_counters"))
+        span = 0.0
+        if row[2] and row[3]:
+            span = max(0.0, (datetime.fromisoformat(row[3]) - datetime.fromisoformat(row[2])).total_seconds())
+        coverage = {f"at_least_{n}": sum(1 for count in counts if count >= n) for n in (2, 4, 8, 16, 32)}
+        forecast = "NOT_READY"
+        if coverage["at_least_8"] >= 3: forecast = "READY_FOR_FORECAST_SANITY"
+        if coverage["at_least_32"] >= 10 and span >= 7 * 86400: forecast = "READY_FOR_FORECAST_BENCHMARK"
         return {"snapshot_count": total, "unique_markets": row[1] or 0,
                 "resolved_markets": resolved, "unresolved_markets": unresolved,
                 "oldest_snapshot": row[2], "newest_snapshot": row[3],
+                "history_span_seconds": span, "snapshots_per_market": {
+                    "min": min(counts) if counts else 0, "max": max(counts) if counts else 0,
+                    "distribution": {str(n): counts.count(n) for n in sorted(set(counts))},
+                }, "coverage": coverage, "resolution_coverage_pct":
+                (round(resolved * 100 / (row[1] or 1), 2) if row[1] else 0.0),
+                "forecast_readiness": forecast,
+                "strategy_backtest_readiness": "READY" if resolved >= 30 else "NOT_READY",
+                "filter_trends": [{"cycle_id": r[0], "observed_at": r[1],
+                    "discovered": r[2], "accepted": r[3], "rejected": r[4],
+                    "rejections_by_reason": json.loads(r[5]),
+                    "quality": {"missing_bid": r[6], "missing_ask": r[7],
+                                "invalid_timestamp": r[8], "schema_errors": r[9],
+                                "duplicate_snapshots": r[10]}} for r in cycles[-20:]],
                 "quality": quality}
 
     def unresolved_market_ids(self, limit: int = 100) -> list[str]:

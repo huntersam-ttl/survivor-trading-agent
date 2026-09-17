@@ -1545,7 +1545,7 @@ def survivor_history_cmd():
     """Read-only history-capture statistics; never runs a cycle or trade."""
     from tradingagents.survivor.history import HistoryStore
 
-    stats = HistoryStore().stats()
+    stats = HistoryStore(read_only=True, initialize=False).stats()
     console.print(json.dumps(stats, sort_keys=True))
 
 

@@ -25,12 +25,17 @@ def default_history_path() -> str:
 
 
 class HistoryStore:
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: str | None = None, *, read_only: bool = False,
+                 initialize: bool = True):
         self.db_path = str(db_path or default_history_path())
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self._init_db()
+        self._read_only = read_only
+        if initialize and not read_only:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            self._init_db()
 
     def _connect(self):
+        if self._read_only:
+            return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=30.0)
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.execute("PRAGMA journal_mode=WAL")
         return conn

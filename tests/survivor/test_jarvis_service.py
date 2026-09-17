@@ -243,7 +243,10 @@ def test_signals_valid_and_bounded(harness):
 
     status, body = request(server, "GET", "/v1/signals")
     assert status == 200
-    assert set(body) >= {"generated_at", "market_open", "candidates"}
+    assert set(body) >= {
+        "generated_at", "market_open", "candidates", "markets_discovered",
+        "accepted_candidates", "rejected_total", "rejections_by_reason",
+    }
     assert body["market_open"] is True
     assert isinstance(body["candidates"], list)
     assert len(body["candidates"]) == 1
@@ -255,6 +258,10 @@ def test_signals_valid_and_bounded(harness):
     assert row["price_change"] is None
     assert isinstance(row["reason_codes"], list)
     assert len(body["candidates"]) <= MAX_CANDIDATES
+    assert body["markets_discovered"] == 1
+    assert body["accepted_candidates"] == 1
+    assert body["rejected_total"] == 0
+    assert body["rejections_by_reason"] == {}
 
 
 def test_signals_empty_market(harness):

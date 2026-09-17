@@ -16,6 +16,7 @@ There is no historical price in a single snapshot, so ``price_change`` is always
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 
 from tradingagents.survivor.markets.scanner import ScanResult
@@ -83,8 +84,15 @@ def build_signal_summary(
         raise ValueError("max_candidates must be non-negative")
     ranked = getattr(result, "ranked", None) or []
     rows = [_candidate_row(c) for c in ranked[:max_candidates]]
+    rejected = getattr(result, "rejected", None) or []
+    rejection_counts = Counter(str(reason.value if hasattr(reason, "value") else reason)
+                               for _, reason in rejected)
     return {
         "generated_at": (generated_at or datetime.now(timezone.utc)).isoformat(),
         "market_open": int(getattr(result, "discovered", 0) or 0) > 0,
         "candidates": rows,
+        "markets_discovered": int(getattr(result, "discovered", 0) or 0),
+        "accepted_candidates": len(getattr(result, "candidates", None) or []),
+        "rejected_total": len(rejected),
+        "rejections_by_reason": dict(sorted(rejection_counts.items())),
     }

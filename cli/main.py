@@ -1449,11 +1449,19 @@ def survivor_halt_cmd():
 @app.command(name="survivor-resume")
 def survivor_resume_cmd():
     """Remove the PAPER autonomy halt. This NEVER enables live trading."""
-    from tradingagents.survivor.autonomy.halt import clear_halt
+    from tradingagents.survivor.autonomy.halt import clear_halt, set_halt
+    from tradingagents.survivor.ops.health import reconcile_resumed_heartbeat
 
     removed = clear_halt()
     if removed:
-        console.print("[green]PAPER autonomy halt removed.[/green] "
+        try:
+            heartbeat = reconcile_resumed_heartbeat()
+        except Exception as exc:  # noqa: BLE001 - fail closed if durable state cannot be written
+            set_halt()
+            console.print(f"[red]PAPER resume failed closed: {exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        console.print("[green]PAPER autonomy halt removed; stopped-supervisor "
+                      f"heartbeat is {heartbeat['halt_state']}/{heartbeat['supervisor_state']}.[/green] "
                       "Mode remains PAPER ONLY; live trading does not exist.")
     else:
         console.print("[yellow]No HALT file present.[/yellow]")

@@ -33,6 +33,7 @@ from tradingagents.survivor.ops.health import (
     preflight_check,
     record_market_probe,
     reconcile_recovery_state,
+    reconcile_resumed_heartbeat,
     recovery_preflight,
     watchdog_record,
     watchdog_status,
@@ -460,6 +461,61 @@ def test_recovery_reconcile_marks_stale_heartbeat_and_recovers_active_count(tmp_
     assert result["heartbeat"]["pid"] == 0
     assert result["heartbeat"]["supervisor_state"] == "STALE"
     assert halt_mod.is_halted(halt_path)
+
+
+@pytest.mark.unit
+def test_resume_transition_clears_halt_and_refreshes_stale_heartbeat(tmp_path, monkeypatch):
+    halt_path = str(tmp_path / "HALT")
+    heartbeat_path = str(tmp_path / "heartbeat.json")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    halt_mod.set_halt(halt_path)
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    state.set_watchdog("consecutive_market_failures", 0)
+    state.set_watchdog("historical_consecutive_market_failures", 31)
+    ops.heartbeat_write(
+        trial_id="trial-1", pid=0, mode="PAPER", last_cycle_id="cycle-7",
+        last_cycle_status="HALTED", halt_state="HALTED", halt_path=halt_path,
+        heartbeat_path=heartbeat_path, supervisor_state="STALE",
+    )
+
+    assert halt_mod.clear_halt(halt_path) is True
+    result = reconcile_resumed_heartbeat(
+        heartbeat_path=heartbeat_path, halt_path=halt_path,
+    )
+
+    assert not halt_mod.is_halted(halt_path)
+    assert result["halt_state"] == "CLEAR"
+    assert result["consistent"] is True
+    assert result["pid"] == 0
+    assert result["supervisor_state"] == "STALE"
+    assert result["last_cycle_status"] == "RECOVERY_READY"
+    assert result["trial_id"] == "trial-1"
+    assert result["last_cycle_id"] == "cycle-7"
+    assert watchdog_status(state)["historical_consecutive_market_failures"] == 31
+    assert watchdog_status(state)["consecutive_market_failures"] == 0
+
+
+@pytest.mark.unit
+def test_resume_cli_restores_halt_when_heartbeat_transition_fails(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    import cli.main as cli_main
+    from tradingagents.survivor.ops import health
+
+    halt_path = str(tmp_path / "HALT")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    halt_mod.set_halt(halt_path)
+
+    def fail_transition(**_kwargs):
+        raise OSError("heartbeat unavailable")
+
+    monkeypatch.setattr(health, "reconcile_resumed_heartbeat", fail_transition)
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["survivor-resume"])
+
+    assert result.exit_code == 1
+    assert halt_mod.is_halted(halt_path)
+    assert "failed closed" in result.stdout
 
 
 # --- 10,000-cycle deterministic synthetic soak -----------------------------------

@@ -312,6 +312,36 @@ def reconcile_recovery_state(
     }
 
 
+def reconcile_resumed_heartbeat(
+    *,
+    heartbeat_path: str | None = None,
+    halt_path: str | None = None,
+) -> dict:
+    """Mark a stopped supervisor ready after the authoritative HALT is removed.
+
+    Resuming the kill switch does not start autonomy.  It only records the
+    durable, non-halted state that a stopped supervisor is expected to have.
+    The caller must remove HALT first; ``heartbeat_write`` still enforces the
+    filesystem kill switch if that transition is attempted too early.
+    """
+    if is_halted(halt_path):
+        raise RuntimeError("cannot reconcile resumed heartbeat while HALT is present")
+
+    previous = heartbeat_read(heartbeat_path)
+    heartbeat_write(
+        trial_id=str(previous.get("trial_id") or "no-trial"),
+        pid=0,
+        mode=str(previous.get("mode") or "PAPER"),
+        last_cycle_id=str(previous.get("last_cycle_id") or ""),
+        last_cycle_status="RECOVERY_READY",
+        halt_state="CLEAR",
+        halt_path=halt_path,
+        heartbeat_path=heartbeat_path,
+        supervisor_state="STALE",
+    )
+    return heartbeat_read(heartbeat_path)
+
+
 # --- heartbeat ------------------------------------------------------------------
 
 def heartbeat_write(

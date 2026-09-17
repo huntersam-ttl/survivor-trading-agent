@@ -15,6 +15,7 @@ from tradingagents.survivor.ops.health import (
     preflight_check,
     record_market_probe,
     reconcile_recovery_state,
+    reconcile_resumed_heartbeat,
     recovery_preflight,
     watchdog_record,
     watchdog_status,
@@ -35,7 +36,7 @@ __all__ = [
     "equity_curve", "failure_analytics", "heartbeat_read", "heartbeat_write",
     "market_data_probe", "model_attribution",
     "persist_snapshot", "preflight_check", "recover_interrupted_cycles",
-    "record_market_probe", "reconcile_recovery_state", "recovery_preflight", "redact_secrets",
+    "record_market_probe", "reconcile_recovery_state", "reconcile_resumed_heartbeat", "recovery_preflight", "redact_secrets",
     "security_selfcheck", "trial_completion", "verify_backup",
     "watchdog_record", "watchdog_status", "weekly_snapshot",
 ]

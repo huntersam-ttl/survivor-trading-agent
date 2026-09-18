@@ -135,7 +135,10 @@ def _invoke_with_deadline(client, messages, deadline: float):
             raise ProviderCallTimeout(f"provider call exceeded {deadline:.1f}s total deadline")
     if result is None:
         try:
-            result = result_queue.get_nowait()
+            # A Queue feeder can flush a completed worker's small envelope just
+            # after the child exits. Give that local transport a bounded drain
+            # window; this is not additional provider-call time.
+            result = result_queue.get(timeout=0.5)
         except queue.Empty:
             result = {"ok": False, "error_type": "ProviderWorkerError", "message": "worker returned no result"}
     result_queue.close()

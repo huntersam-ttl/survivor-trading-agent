@@ -82,6 +82,7 @@ class CycleReport:
     research_candidates: int = 0
     ai_researched: int = 0
     skipped_budget: int = 0
+    budget_blocked_count: int = 0
     trade_proposals: int = 0
     approved: int = 0
     rejected: int = 0
@@ -104,6 +105,7 @@ class CycleReport:
             f"Research candidates: {self.research_candidates}",
             f"AI researched: {self.ai_researched}",
             f"Skipped for budget: {self.skipped_budget}",
+            f"Budget blocked: {self.budget_blocked_count}",
             f"Trade proposals: {self.trade_proposals}",
             f"Approved: {self.approved}",
             f"Rejected: {self.rejected}",
@@ -511,7 +513,9 @@ def run_survivor_cycle(
     metrics = {
         "discovered": report.markets_discovered, "passed": report.passed_filters,
         "research_candidates": report.research_candidates, "researched": report.ai_researched,
-        "skipped_budget": report.skipped_budget, "proposals": report.trade_proposals,
+        "skipped_budget": report.skipped_budget,
+        "budget_blocked_count": report.budget_blocked_count,
+        "proposals": report.trade_proposals,
         "approved": report.approved, "rejected": report.rejected,
         "executed": report.paper_trades, "ai_cost_pence": report.ai_cost_pence,
         "duration_sec": report.duration_sec,
@@ -630,6 +634,7 @@ def _run_cycle_body(
             preflight = budget_preflight(survivor_policy, usage)
             if not preflight.ok:
                 report.skipped_budget += 1
+                report.budget_blocked_count += 1
                 state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
                                        candidate.score, "NO_TRADE", "SKIPPED", "AI_BUDGET_UNAVAILABLE")
                 continue
@@ -673,6 +678,8 @@ def _run_cycle_body(
             result = research_fn(candidate, quote, config, run_id)
             if result.status != "OK" or result.expected_probability_bps is None or result.quantity is None:
                 report.ai_cost_pence += result.ai_cost_pence
+                if (result.reason or "").startswith("AI_BUDGET_UNAVAILABLE"):
+                    report.budget_blocked_count += 1
                 report.candidate_failures.append(
                     {"market_id": snapshot.market_id, "reason": result.reason or "RESEARCH_FAILED"}
                 )
@@ -804,6 +811,10 @@ def _run_cycle_body(
                         ))
 
 
+    # A cycle that reached research but could not obtain any model result is
+    # budget-blocked, not risk-rejected. This is read-only evidence.
+    if report.budget_blocked_count and report.ai_researched == 0 and report.trade_proposals == 0:
+        report.reason = "AI_BUDGET_UNAVAILABLE"
     report.status = "DRY_RUN" if dry_run_enabled(config) else "ACTIVE"
 
     # Phase 5: watchdog, heartbeat, AI spend alerts (operations, no self-tuning)

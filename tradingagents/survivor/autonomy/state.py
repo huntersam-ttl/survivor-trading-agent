@@ -103,6 +103,11 @@ class RuntimeState:
                 "id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, market_id TEXT NOT NULL,"
                 " run_id TEXT, status TEXT NOT NULL, reason TEXT)"
             )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(cycles)")}
+            if "budget_blocked_count" not in columns:
+                conn.execute(
+                    "ALTER TABLE cycles ADD COLUMN budget_blocked_count INTEGER NOT NULL DEFAULT 0"
+                )
 
     # --- writes -----------------------------------------------------------------
     def start_cycle(self, cycle_id: str, now: datetime | None = None) -> None:
@@ -121,7 +126,8 @@ class RuntimeState:
                 UPDATE cycles SET finished_utc = ?, status = ?, reason = ?,
                     discovered = ?, passed = ?, research_candidates = ?, researched = ?,
                     skipped_budget = ?, proposals = ?, approved = ?, rejected = ?,
-                    executed = ?, ai_cost_pence = ?, duration_sec = ?
+                    executed = ?, ai_cost_pence = ?, duration_sec = ?,
+                    budget_blocked_count = ?
                 WHERE cycle_id = ?
                 """,
                 (
@@ -131,7 +137,8 @@ class RuntimeState:
                     metrics.get("skipped_budget", 0), metrics.get("proposals", 0),
                     metrics.get("approved", 0), metrics.get("rejected", 0),
                     metrics.get("executed", 0), metrics.get("ai_cost_pence", 0),
-                    metrics.get("duration_sec", 0.0), cycle_id,
+                    metrics.get("duration_sec", 0.0), metrics.get("budget_blocked_count", 0),
+                    cycle_id,
                 ),
             )
 

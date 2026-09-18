@@ -26,6 +26,17 @@ class _BlockingClient:
         time.sleep(10)
 
 
+class _FastClient:
+    def invoke(self, messages):
+        return {"ok": True, "messages": messages}
+
+
+@pytest.mark.unit
+def test_provider_call_returns_normal_response_and_cleans_worker():
+    result = _invoke_with_deadline(_FastClient(), "hello", 2)
+    assert result == {"ok": True, "messages": "hello"}
+
+
 @pytest.mark.unit
 def test_provider_call_has_real_total_deadline():
     started = time.monotonic()

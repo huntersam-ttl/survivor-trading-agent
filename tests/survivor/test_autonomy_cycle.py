@@ -12,6 +12,7 @@ from tradingagents.survivor.autonomy.cycle import (
 from tradingagents.survivor.autonomy.lock import CycleLock
 from tradingagents.survivor.autonomy.state import RuntimeState
 from tradingagents.survivor.policy import SurvivorPolicy
+from tradingagents.survivor.types import ProviderCallTimeout
 
 GOOD_EDGE = {
     'expected_probability_bps': 7000,  # gross 1800 - 250 costs = 1550bps net edge
@@ -146,6 +147,42 @@ def test_candidate_failure_isolated_others_continue(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_provider_timeout_continues_to_next_candidate(tmp_path, monkeypatch):
+    adapter = FakeMarketAdapter([make_snapshot(f"mkt-{i}") for i in range(2)])
+
+    def research(candidate, quote, config, run_id):
+        if candidate.market_id == "mkt-0":
+            raise ProviderCallTimeout("provider call exceeded 0.2s total deadline")
+        return ResearchResult(status="OK", decision_text="NO_TRADE")
+
+    report = _cycle(tmp_path, adapter, monkeypatch, research_fn=research)
+    assert report.reason == "NO_PROPOSAL"
+    assert report.research_attempts == 2
+    assert report.research_inference_failed_count == 1
+    assert report.candidate_failures[0]["reason"].startswith("RESEARCH_PROVIDER_TIMEOUT")
+    assert report.paper_trades == 0
+
+
+@pytest.mark.unit
+def test_all_provider_timeouts_finalize_without_downstream_actions(tmp_path, monkeypatch):
+    adapter = FakeMarketAdapter([make_snapshot(f"mkt-{i}") for i in range(3)])
+
+    def research(*args):
+        raise ProviderCallTimeout("provider call exceeded 0.2s total deadline")
+
+    report = _cycle(tmp_path, adapter, monkeypatch, research_fn=research)
+    assert report.status == "ACTIVE"
+    assert report.reason == "NO_PROPOSAL"
+    assert report.pipeline_stage == "RESEARCH"
+    assert report.research_attempts == 3
+    assert report.research_inference_failed_count == 3
+    assert report.trade_proposals == 0
+    assert report.risk_decisions == 0
+    assert report.jarvis_decisions == 0
+    assert report.paper_trades == 0
+
+
+@pytest.mark.unit
 def test_successful_cycle_resets_market_failure_watchdog(tmp_path, monkeypatch):
     from tradingagents.survivor.ops.health import watchdog_record
 
@@ -221,4 +258,3 @@ def test_malicious_text_cannot_alter_safety_controls(tmp_path, monkeypatch):
     assert RiskLimits().allow_leverage is False and RiskLimits().allow_shorting is False
     assert SurvivorPolicy().mode.value == "PAPER_ONLY"
     assert report.paper_trades == 1  # normal deterministic paper path, nothing more
-

@@ -1,6 +1,7 @@
 """MarketAdapter contract, MarketSnapshot currency semantics, and injection defense."""
 
 import pytest
+import time
 
 from tests.survivor.market_helpers import FakeMarketAdapter, make_snapshot
 from tradingagents.survivor.autonomy.injection import build_evidence, detect_suspicious
@@ -11,6 +12,14 @@ from tradingagents.survivor.markets.types import (
     QuoteCurrency,
     ScanRejection,
 )
+
+
+def _test_success_worker(path, params, result_queue):
+    result_queue.put({"ok": True, "status": 200, "rows": [{"id": "ok"}], "duration_ms": 1.0})
+
+
+def _test_slow_worker(path, params, result_queue):
+    time.sleep(10)
 
 
 @pytest.mark.unit
@@ -132,11 +141,11 @@ def test_polymarket_adapter_paginates_bounded_universe_and_deduplicates(monkeypa
     }
     calls = []
 
-    def request(path, params):
+    def request(path, params, deadline, worker=None):
         calls.append((path, params.copy()))
-        return pages.get(params["offset"], [])
+        return {"ok": True, "status": 200, "rows": pages.get(params["offset"], []), "duration_ms": 1.0}
 
-    monkeypatch.setattr(module.gamma, "_request", request)
+    monkeypatch.setattr(module, "_run_gamma_page", request)
     monkeypatch.setattr(module.gamma, "_is_forward_looking", lambda market, now: True)
 
     markets = module.PolymarketAdapter().list_markets(limit=150)
@@ -150,24 +159,15 @@ def test_polymarket_adapter_paginates_bounded_universe_and_deduplicates(monkeypa
 
 def test_polymarket_page_timeout_retries_once_and_fails_closed(monkeypatch):
     from tradingagents.survivor.markets import polymarket_adapter as module
-    from tradingagents.dataflows import polymarket as gamma
-
-    class TimedOut:
-        def __enter__(self):
-            raise gamma.GammaTotalTimeout("deadline")
-        def __exit__(self, *args):
-            return False
-
-    calls = []
-    monkeypatch.setattr(module.gamma, "request_deadline", lambda _: TimedOut())
-    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: calls.append(1))
+    monkeypatch.setattr(module, "_run_gamma_page", lambda *args, **kwargs: {
+        "ok": False, "category": "GAMMA_TOTAL_TIMEOUT", "message": "deadline",
+    })
     adapter = module.PolymarketAdapter()
 
     with pytest.raises(module.GammaPageError) as exc_info:
         adapter.list_markets(limit=100)
 
     assert exc_info.value.category == "GAMMA_TOTAL_TIMEOUT"
-    assert len(calls) == 0
     telemetry = exc_info.value.telemetry
     assert telemetry["pages_attempted"] == 1
     assert telemetry["pages_completed"] == 0
@@ -178,7 +178,9 @@ def test_polymarket_page_timeout_retries_once_and_fails_closed(monkeypatch):
 def test_polymarket_invalid_json_is_typed_and_bounded(monkeypatch):
     from tradingagents.survivor.markets import polymarket_adapter as module
 
-    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: {"not": "a list"})
+    monkeypatch.setattr(module, "_run_gamma_page", lambda *args, **kwargs: {
+        "ok": False, "category": "GAMMA_INVALID_JSON", "message": "not a list",
+    })
     adapter = module.PolymarketAdapter()
     with pytest.raises(module.GammaPageError) as exc_info:
         adapter.list_markets(limit=100)
@@ -186,38 +188,52 @@ def test_polymarket_invalid_json_is_typed_and_bounded(monkeypatch):
     assert len(exc_info.value.telemetry["pages"]) == 2
 
 
-def test_polymarket_slow_read_hits_wall_clock_deadline(monkeypatch):
+def test_polymarket_child_timeout_is_killable():
     from tradingagents.survivor.markets import polymarket_adapter as module
-    from tradingagents.dataflows import polymarket as gamma
-    import time
+    started = time.monotonic()
+    result = module._run_gamma_page("markets", {}, 0.5, worker=_test_slow_worker)
+    assert time.monotonic() - started < 3.5
+    assert result["category"] == "GAMMA_TOTAL_TIMEOUT"
+
+
+def test_polymarket_child_success_is_cleanly_reaped():
+    from tradingagents.survivor.markets import polymarket_adapter as module
+
+    result = module._run_gamma_page("markets", {}, 2, worker=_test_success_worker)
+    assert result["ok"] is True
+    assert result["status"] == 200
+    assert result["rows"] == [{"id": "ok"}]
+
+
+def test_polymarket_timeout_retries_and_accepts_success(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
+
+    attempts = []
+    row = {"id": "retry-success", "closed": False, "endDate": "2099-01-01T00:00:00Z"}
+
+    def run_page(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return {"ok": False, "category": "GAMMA_TOTAL_TIMEOUT", "message": "deadline"}
+        return {"ok": True, "status": 200, "rows": [row], "duration_ms": 1.0}
+
+    monkeypatch.setattr(module, "_run_gamma_page", run_page)
+    monkeypatch.setattr(module.gamma, "_is_forward_looking", lambda market, now: True)
+
+    assert module.PolymarketAdapter().list_markets(limit=100) == [row]
+    assert len(attempts) == 2
+
+
+def test_polymarket_page_timeout_is_typed_and_bounded(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
 
     monkeypatch.setenv("SURVIVOR_GAMMA_PAGE_DEADLINE_SECONDS", "1")
-    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: time.sleep(2))
+    monkeypatch.setattr(module, "_run_gamma_page", lambda *args, **kwargs: {
+        "ok": False, "category": "GAMMA_TOTAL_TIMEOUT", "message": "deadline",
+    })
     adapter = module.PolymarketAdapter()
     started = time.monotonic()
     with pytest.raises(module.GammaPageError) as exc_info:
         adapter.list_markets(limit=100)
     assert time.monotonic() - started < 3.5
     assert exc_info.value.category == "GAMMA_TOTAL_TIMEOUT"
-
-
-def test_gamma_request_passes_total_timeout_to_requests(monkeypatch):
-    from tradingagents.dataflows import polymarket as gamma
-
-    seen = {}
-
-    class Response:
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
-        def raise_for_status(self): pass
-        def json(self): return []
-
-    def fake_get(*args, **kwargs):
-        seen["timeout"] = kwargs["timeout"]
-        return Response()
-
-    monkeypatch.setattr(gamma.requests, "get", fake_get)
-    gamma._request("markets", {}, deadline_seconds=12)
-    assert seen["timeout"].total == 12
-    assert seen["timeout"]._connect == 12
-    assert seen["timeout"]._read is None

@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
+import queue
 import time
 from datetime import datetime, timezone
 
@@ -33,6 +35,7 @@ MARKET_TYPE = "prediction_binary"
 PAGE_SIZE = 100
 DEFAULT_UNIVERSE_LIMIT = 1000
 PAGE_RETRIES = 1
+PAGE_BACKOFF_SECONDS = 0.2
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +53,68 @@ def _page_deadline_seconds() -> float:
         return max(1.0, float(os.environ.get("SURVIVOR_GAMMA_PAGE_DEADLINE_SECONDS", "30")))
     except ValueError:
         return 30.0
+
+
+def _gamma_page_worker(path: str, params: dict, result_queue) -> None:
+    """Fetch one page in an isolated process; output is bounded and serializable."""
+    started = time.monotonic()
+    try:
+        with requests.request(
+            "GET",
+            f"{gamma.GAMMA_BASE}/{path}", params=params,
+            timeout=(gamma.REQUEST_TIMEOUT, gamma.REQUEST_TIMEOUT),
+        ) as response:
+            status = int(response.status_code)
+            response.raise_for_status()
+            data = response.json()
+        if not isinstance(data, list):
+            raise ValueError("Gamma response was not a JSON list")
+        result_queue.put({
+            "ok": True, "status": status, "rows": data,
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        })
+    except requests.exceptions.ConnectTimeout as exc:
+        result_queue.put({"ok": False, "category": "GAMMA_CONNECT_TIMEOUT", "message": str(exc)[:200]})
+    except requests.exceptions.ReadTimeout as exc:
+        result_queue.put({"ok": False, "category": "GAMMA_READ_TIMEOUT", "message": str(exc)[:200]})
+    except requests.exceptions.HTTPError as exc:
+        result_queue.put({"ok": False, "category": "GAMMA_HTTP_ERROR", "message": str(exc)[:200]})
+    except (requests.exceptions.RequestException, json.JSONDecodeError, ValueError) as exc:
+        result_queue.put({"ok": False, "category": "GAMMA_INVALID_JSON", "message": str(exc)[:200]})
+    except Exception as exc:  # noqa: BLE001 - child reports bounded failure only
+        result_queue.put({"ok": False, "category": "GAMMA_WORKER_ERROR", "message": str(exc)[:200]})
+
+
+def _run_gamma_page(path: str, params: dict, deadline: float, worker=None) -> dict:
+    """Run one fetch in a killable process and guarantee parent-side cleanup."""
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    target = worker or _gamma_page_worker
+    process = context.Process(target=target, args=(path, params, result_queue), daemon=True)
+    started = time.monotonic()
+    process.start()
+    process.join(max(0.001, float(deadline)))
+    if process.is_alive():
+        process.terminate()
+        process.join(2.0)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(2.0)
+        result = {
+            "ok": False, "category": "GAMMA_TOTAL_TIMEOUT",
+            "message": f"worker exceeded {deadline:.1f}s deadline",
+        }
+    else:
+        try:
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            result = {"ok": False, "category": "GAMMA_WORKER_ERROR", "message": "worker returned no result"}
+    result["worker_pid"] = process.pid
+    result["duration_ms"] = round((time.monotonic() - started) * 1000, 2)
+    result_queue.close()
+    result_queue.join_thread()
+    process.close()
+    return result
 
 
 def _iso_to_iso(value: str | None) -> str | None:
@@ -84,38 +149,38 @@ class PolymarketAdapter(MarketAdapter):
             category = None
             rows = 0
             try:
-                with gamma.request_deadline(deadline):
-                    data = gamma._request("markets", params)
+                result = _run_gamma_page("markets", params, deadline)
+                if not result.get("ok"):
+                    category = result.get("category", "GAMMA_WORKER_ERROR")
+                    raise RuntimeError(result.get("message", "Gamma worker failed"))
+                data = result.get("rows")
                 if not isinstance(data, list):
                     category = "GAMMA_INVALID_JSON"
-                    raise ValueError("Gamma markets response was not a JSON list")
+                    raise ValueError("Gamma worker returned non-list rows")
                 rows = len(data)
                 self.last_scan_telemetry["pages"].append({
                     "page": page, "offset": offset, "attempt": attempt + 1,
-                    "duration_ms": round((time.monotonic() - started) * 1000, 2),
-                    "rows": rows, "status": status, "category": category,
+                    "worker_pid": result.get("worker_pid"),
+                    "duration_ms": result.get("duration_ms", round((time.monotonic() - started) * 1000, 2)),
+                    "rows": rows, "status": "SUCCESS", "category": None,
                 })
                 self.last_scan_telemetry["pages_completed"] += 1
                 self.last_scan_telemetry["rows_fetched"] += rows
                 return data
-            except gamma.GammaTotalTimeout as exc:
-                category, last_error = "GAMMA_TOTAL_TIMEOUT", exc
-            except requests.exceptions.ConnectTimeout as exc:
-                category, last_error = "GAMMA_CONNECT_TIMEOUT", exc
-            except requests.exceptions.ReadTimeout as exc:
-                category, last_error = "GAMMA_READ_TIMEOUT", exc
-            except requests.exceptions.HTTPError as exc:
-                category, last_error = "GAMMA_HTTP_ERROR", exc
-            except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as exc:
-                category, last_error = "GAMMA_INVALID_JSON", exc
+            except Exception as exc:  # bounded worker result or local validation
+                if category is None:
+                    category = "GAMMA_INVALID_JSON"
+                last_error = exc
             status = "ERROR"
             self.last_scan_telemetry["pages"].append({
                 "page": page, "offset": offset, "attempt": attempt + 1,
-                "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                "worker_pid": locals().get("result", {}).get("worker_pid"),
+                "duration_ms": locals().get("result", {}).get("duration_ms", round((time.monotonic() - started) * 1000, 2)),
                 "rows": rows, "status": status, "category": category,
             })
             if attempt < retries:
                 logger.warning("Gamma page %s failed (%s); retrying once", page, category)
+                time.sleep(PAGE_BACKOFF_SECONDS)
                 continue
             self.last_scan_telemetry["failure_page"] = page
             self.last_scan_telemetry["failure_category"] = category

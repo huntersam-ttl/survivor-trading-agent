@@ -11,13 +11,9 @@ outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 """
 import json
 import logging
-import signal
-import threading
-from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import requests
-from urllib3.util import Timeout as Urllib3Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -25,57 +21,19 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
-PAGE_DEADLINE_SECONDS = 30
 
 # Default number of markets to return, ranked by traded volume.
 DEFAULT_LIMIT = 6
 
 
-class GammaTotalTimeout(TimeoutError):
-    """The full Gamma request exceeded its wall-clock page deadline."""
-
-
-@contextmanager
-def request_deadline(seconds: float):
-    """Bound one synchronous request without leaving worker threads behind."""
-    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
-        yield
-        return
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
-
-    def _raise_timeout(_signum, _frame):
-        raise GammaTotalTimeout(f"Gamma request exceeded {seconds:.1f}s wall-clock deadline")
-
-    signal.signal(signal.SIGALRM, _raise_timeout)
-    # Prevent macOS/Python from transparently restarting the interrupted SSL
-    # read (PEP 475), which would otherwise defeat the wall-clock deadline.
-    signal.siginterrupt(signal.SIGALRM, True)
-    signal.setitimer(signal.ITIMER_REAL, max(0.001, float(seconds)))
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer[0] > 0:
-            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
-
-
-def _request(path: str, params: dict, *, deadline_seconds: float | None = None) -> dict:
-    deadline = float(deadline_seconds or PAGE_DEADLINE_SECONDS)
-    # Requests otherwise treats a scalar/tuple timeout as a per-socket-read
-    # budget. urllib3's total timeout carries the wall-clock budget through the
-    # exact Requests adapter, including slow-drip responses.
-    timeout = Urllib3Timeout(
-        total=deadline, connect=min(REQUEST_TIMEOUT, deadline), read=None,
-    )
-    with request_deadline(deadline):
-        with requests.get(
-            f"{GAMMA_BASE}/{path}", params=params,
-            timeout=timeout,
-        ) as response:
-            response.raise_for_status()
-            return response.json()
+def _request(path: str, params: dict) -> dict:
+    """Fetch a non-paginated Gamma response with bounded socket timeouts."""
+    with requests.get(
+        f"{GAMMA_BASE}/{path}", params=params,
+        timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+    ) as response:
+        response.raise_for_status()
+        return response.json()
 
 
 def _parse_json_list(value) -> list:

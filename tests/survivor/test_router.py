@@ -31,10 +31,27 @@ class _FastClient:
         return {"ok": True, "messages": messages}
 
 
+class _MessageClient:
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(
+            content="provider response",
+            usage_metadata={"input_tokens": 3, "output_tokens": 4, "total_tokens": 7},
+        )
+
+
 @pytest.mark.unit
 def test_provider_call_returns_normal_response_and_cleans_worker():
     result = _invoke_with_deadline(_FastClient(), "hello", 2)
     assert result == {"ok": True, "messages": "hello"}
+
+
+@pytest.mark.unit
+def test_provider_message_response_round_trips_through_worker():
+    result = _invoke_with_deadline(_MessageClient(), "hello", 2)
+    assert result.content == "provider response"
+    assert result.usage_metadata["output_tokens"] == 4
 
 
 @pytest.mark.unit

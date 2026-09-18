@@ -47,10 +47,51 @@ from tradingagents.survivor.types import (
 logger = logging.getLogger(__name__)
 
 
+def _wire_value(value):
+    """Convert provider metadata/results to bounded multiprocessing-safe data."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _wire_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_wire_value(item) for item in value]
+    if hasattr(value, "model_dump"):
+        return _wire_value(value.model_dump(mode="json"))
+    return str(value)
+
+
+def _provider_response_wire(response):
+    """Return a small plain-data envelope for the parent process."""
+    if hasattr(response, "content"):
+        return {
+            "kind": "message",
+            "content": _wire_value(response.content),
+            "additional_kwargs": _wire_value(getattr(response, "additional_kwargs", {})),
+            "response_metadata": _wire_value(getattr(response, "response_metadata", {})),
+            "usage_metadata": _wire_value(getattr(response, "usage_metadata", {})),
+        }
+    if hasattr(response, "model_dump"):
+        return {"kind": "value", "value": _wire_value(response.model_dump(mode="json"))}
+    return {"kind": "value", "value": _wire_value(response)}
+
+
+def _provider_response_from_wire(envelope):
+    if envelope.get("kind") != "message":
+        return envelope.get("value")
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=envelope.get("content"),
+        additional_kwargs=envelope.get("additional_kwargs") or {},
+        response_metadata=envelope.get("response_metadata") or {},
+        usage_metadata=envelope.get("usage_metadata") or None,
+    )
+
+
 def _provider_call_worker(client, messages, result_queue) -> None:
     """Invoke one already-configured client and return only a bounded result."""
     try:
-        result_queue.put({"ok": True, "response": client.invoke(messages)})
+        result_queue.put({"ok": True, "response": _provider_response_wire(client.invoke(messages))})
     except BaseException as exc:  # noqa: BLE001 - parent classifies safely
         result_queue.put({
             "ok": False,
@@ -101,7 +142,7 @@ def _invoke_with_deadline(client, messages, deadline: float):
     result_queue.join_thread()
     process.close()
     if result.get("ok"):
-        return result["response"]
+        return _provider_response_from_wire(result["response"])
     raise RuntimeError(f"{result.get('error_type', 'ProviderError')}: {result.get('message', '')}")
 
 # Roles that may use a stronger (more expensive) model when the operator

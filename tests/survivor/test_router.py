@@ -71,7 +71,7 @@ def test_provider_timeout_settles_budget_reservation(test_router, monkeypatch):
 
     monkeypatch.setattr("tradingagents.llm_clients.router._invoke_with_deadline", timeout)
     fake_client = MagicMock()
-    fake_client.get_llm.return_value = MagicMock()
+    fake_client.get_llm.return_value = _FastClient()
     monkeypatch.setattr("tradingagents.llm_clients.router.create_llm_client", lambda **kwargs: fake_client)
     router.role_routes["timeout_role"] = MagicMock(
         get_all_routes=MagicMock(return_value=[("minimax", "minimax-text-01")])

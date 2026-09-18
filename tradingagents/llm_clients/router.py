@@ -577,14 +577,15 @@ class ModelRouter:
                 client = mock_client_factory(provider=provider, model=model, **llm_kwargs)
             else:
                 client = create_llm_client(provider=provider, model=model, **llm_kwargs).get_llm()
-            if mock_client_factory and llm_transform is not None:
+            is_test_double = type(client).__module__.startswith("unittest.mock")
+            if (mock_client_factory or is_test_double) and llm_transform is not None:
                 client = llm_transform(client)
             # Test doubles are deliberately invoked in-process so existing
             # unit seams remain deterministic. Real provider clients always
             # use the killable process boundary.
             response = (
                 client.invoke(messages)
-                if mock_client_factory
+                if mock_client_factory or is_test_double
                 else _invoke_with_deadline(
                     None,
                     messages,

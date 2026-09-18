@@ -70,7 +70,19 @@ class RuntimeState:
                     rejected INTEGER NOT NULL DEFAULT 0,
                     executed INTEGER NOT NULL DEFAULT 0,
                     ai_cost_pence INTEGER NOT NULL DEFAULT 0,
-                    duration_sec REAL NOT NULL DEFAULT 0
+                    duration_sec REAL NOT NULL DEFAULT 0,
+                    pipeline_stage TEXT NOT NULL DEFAULT 'SCAN',
+                    research_attempts INTEGER NOT NULL DEFAULT 0,
+                    research_successes INTEGER NOT NULL DEFAULT 0,
+                    research_failures INTEGER NOT NULL DEFAULT 0,
+                    research_no_trade_count INTEGER NOT NULL DEFAULT 0,
+                    research_inference_failed_count INTEGER NOT NULL DEFAULT 0,
+                    risk_decisions INTEGER NOT NULL DEFAULT 0,
+                    jarvis_decisions INTEGER NOT NULL DEFAULT 0,
+                    structured_primary_success INTEGER NOT NULL DEFAULT 0,
+                    structured_extraction_success INTEGER NOT NULL DEFAULT 0,
+                    structured_repair_success INTEGER NOT NULL DEFAULT 0,
+                    structured_final_failure INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -108,6 +120,23 @@ class RuntimeState:
                 conn.execute(
                     "ALTER TABLE cycles ADD COLUMN budget_blocked_count INTEGER NOT NULL DEFAULT 0"
                 )
+            migrations = {
+                "pipeline_stage": "TEXT NOT NULL DEFAULT 'SCAN'",
+                "research_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "research_successes": "INTEGER NOT NULL DEFAULT 0",
+                "research_failures": "INTEGER NOT NULL DEFAULT 0",
+                "research_no_trade_count": "INTEGER NOT NULL DEFAULT 0",
+                "research_inference_failed_count": "INTEGER NOT NULL DEFAULT 0",
+                "risk_decisions": "INTEGER NOT NULL DEFAULT 0",
+                "jarvis_decisions": "INTEGER NOT NULL DEFAULT 0",
+                "structured_primary_success": "INTEGER NOT NULL DEFAULT 0",
+                "structured_extraction_success": "INTEGER NOT NULL DEFAULT 0",
+                "structured_repair_success": "INTEGER NOT NULL DEFAULT 0",
+                "structured_final_failure": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, definition in migrations.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE cycles ADD COLUMN {name} {definition}")
 
     # --- writes -----------------------------------------------------------------
     def start_cycle(self, cycle_id: str, now: datetime | None = None) -> None:
@@ -127,7 +156,12 @@ class RuntimeState:
                     discovered = ?, passed = ?, research_candidates = ?, researched = ?,
                     skipped_budget = ?, proposals = ?, approved = ?, rejected = ?,
                     executed = ?, ai_cost_pence = ?, duration_sec = ?,
-                    budget_blocked_count = ?
+                    budget_blocked_count = ?, pipeline_stage = ?,
+                    research_attempts = ?, research_successes = ?, research_failures = ?,
+                    research_no_trade_count = ?, research_inference_failed_count = ?,
+                    risk_decisions = ?, jarvis_decisions = ?,
+                    structured_primary_success = ?, structured_extraction_success = ?,
+                    structured_repair_success = ?, structured_final_failure = ?
                 WHERE cycle_id = ?
                 """,
                 (
@@ -138,6 +172,15 @@ class RuntimeState:
                     metrics.get("approved", 0), metrics.get("rejected", 0),
                     metrics.get("executed", 0), metrics.get("ai_cost_pence", 0),
                     metrics.get("duration_sec", 0.0), metrics.get("budget_blocked_count", 0),
+                    metrics.get("pipeline_stage", "SCAN"),
+                    metrics.get("research_attempts", 0), metrics.get("research_successes", 0),
+                    metrics.get("research_failures", 0), metrics.get("research_no_trade_count", 0),
+                    metrics.get("research_inference_failed_count", 0),
+                    metrics.get("risk_decisions", 0), metrics.get("jarvis_decisions", 0),
+                    metrics.get("structured_primary_success", 0),
+                    metrics.get("structured_extraction_success", 0),
+                    metrics.get("structured_repair_success", 0),
+                    metrics.get("structured_final_failure", 0),
                     cycle_id,
                 ),
             )
@@ -197,7 +240,48 @@ class RuntimeState:
                 "SELECT * FROM cycles WHERE finished_utc IS NOT NULL "
                 "ORDER BY started_utc DESC LIMIT 1"
             ).fetchone()
-        return dict(row) if row else None
+            if not row:
+                return None
+            result = dict(row)
+            cycle_id = result["cycle_id"]
+            # Legacy cycles predate the outcome columns. Derive compact counts
+            # from already-persisted research/candidate records on read; this
+            # does not rewrite runtime.db or alter trading behavior.
+            research = conn.execute(
+                "SELECT status, reason FROM research_runs WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchall()
+            candidates = conn.execute(
+                "SELECT decision, status, reason FROM candidates WHERE cycle_id = ?",
+                (cycle_id,),
+            ).fetchall()
+        if research:
+            successes = sum(r["status"] == "OK" for r in research)
+            failures = len(research) - successes
+            no_trade = sum(
+                r["status"] == "PROPOSED" and str(r["decision"] or "").upper() == "NO_TRADE"
+                for r in candidates
+            )
+            inference_failures = sum(
+                str(r["reason"] or "").startswith("INFERENCE_FAILED") for r in research
+            )
+            result.update({
+                "research_attempts": len(research),
+                "research_successes": successes,
+                "research_failures": failures,
+                "research_no_trade_count": no_trade,
+                "research_inference_failed_count": inference_failures,
+            })
+            if not result.get("proposals") and result.get("reason") not in (
+                "AI_BUDGET_UNAVAILABLE", "RISK_REJECTED",
+            ):
+                result["reason"] = "NO_PROPOSAL"
+                result["pipeline_stage"] = "RESEARCH"
+            result["structured_final_failure"] = sum(
+                "structured output and one repair were invalid" in str(r["reason"] or "").lower()
+                for r in research
+            )
+        return result
 
     # --- watchdog kv store ---------------------------------------------------------
     def _watchdog_table(self, conn: sqlite3.Connection) -> None:

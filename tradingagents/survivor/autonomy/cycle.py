@@ -70,6 +70,7 @@ class ResearchResult:
     run_id: str | None = None
     status: str = "OK"          # OK | FAILED
     reason: str | None = None
+    structured_telemetry: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -83,6 +84,18 @@ class CycleReport:
     ai_researched: int = 0
     skipped_budget: int = 0
     budget_blocked_count: int = 0
+    research_attempts: int = 0
+    research_successes: int = 0
+    research_failures: int = 0
+    research_no_trade_count: int = 0
+    research_inference_failed_count: int = 0
+    risk_decisions: int = 0
+    jarvis_decisions: int = 0
+    pipeline_stage: str = "SCAN"
+    structured_primary_success: int = 0
+    structured_extraction_success: int = 0
+    structured_repair_success: int = 0
+    structured_final_failure: int = 0
     trade_proposals: int = 0
     approved: int = 0
     rejected: int = 0
@@ -106,6 +119,9 @@ class CycleReport:
             f"AI researched: {self.ai_researched}",
             f"Skipped for budget: {self.skipped_budget}",
             f"Budget blocked: {self.budget_blocked_count}",
+            f"Pipeline stage: {self.pipeline_stage}",
+            f"Research failures: {self.research_failures}",
+            f"Research NO_TRADE: {self.research_no_trade_count}",
             f"Trade proposals: {self.trade_proposals}",
             f"Approved: {self.approved}",
             f"Rejected: {self.rejected}",
@@ -251,9 +267,11 @@ def _research_failure(
     reason: str,
     run_id: str | None,
     ai_cost_pence: int = 0,
+    structured_telemetry: dict[str, int] | None = None,
 ) -> ResearchResult:
     return ResearchResult(
-        status="FAILED", reason=reason[:200], run_id=run_id, ai_cost_pence=ai_cost_pence
+        status="FAILED", reason=reason[:200], run_id=run_id, ai_cost_pence=ai_cost_pence,
+        structured_telemetry=dict(structured_telemetry or {}),
     )
 
 
@@ -397,9 +415,18 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         research_config["deep_think_llm"] = or_strong
         research_config["quick_think_llm"] = or_model
 
+    telemetry = {
+        "structured_primary_success": 0,
+        "structured_extraction_success": 0,
+        "structured_repair_success": 0,
+        "structured_final_failure": 0,
+    }
+    token = None
     try:
         graph = TradingAgentsGraph(config=research_config)
         trade_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        from tradingagents.agents.utils.structured import structured_telemetry_scope, reset_structured_telemetry
+        token = structured_telemetry_scope(telemetry)
         final_state, _signal = graph.propagate(symbol, trade_date, asset_type="prediction_market")
     except ImportError as exc:
         return _research_failure(f"RESEARCH_BACKEND_UNAVAILABLE: {exc}", run_id)
@@ -408,7 +435,10 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
             int(usage.get_run_usage_summary(run_id).get("total_cost_pence") or 0)
             if usage is not None else 0
         )
-        return _research_failure(_classify_inference_error(exc), run_id, failed_cost)
+        return _research_failure(_classify_inference_error(exc), run_id, failed_cost, telemetry)
+    finally:
+        if token is not None:
+            reset_structured_telemetry(token)
 
     usage_summary = usage.get_run_usage_summary(run_id) if usage is not None else {}
     ai_cost_pence = int(usage_summary.get("total_cost_pence") or 0)
@@ -429,7 +459,7 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         if not match:
             return _research_failure(
                 "RESEARCH_NO_PROBABILITY_ESTIMATE: final decision missing structured probability and 'P(YES): <NN>%' line",
-                run_id,
+                run_id, structured_telemetry=telemetry,
             )
         probability_bps = min(10000, max(0, round(float(match.group(1)) * 100)))
 
@@ -445,6 +475,7 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         uncertainty_penalty_bps=0,
         ai_cost_pence=ai_cost_pence,
         run_id=run_id,
+        structured_telemetry=telemetry,
     )
 
 
@@ -515,6 +546,18 @@ def run_survivor_cycle(
         "research_candidates": report.research_candidates, "researched": report.ai_researched,
         "skipped_budget": report.skipped_budget,
         "budget_blocked_count": report.budget_blocked_count,
+        "pipeline_stage": report.pipeline_stage,
+        "research_attempts": report.research_attempts,
+        "research_successes": report.research_successes,
+        "research_failures": report.research_failures,
+        "research_no_trade_count": report.research_no_trade_count,
+        "research_inference_failed_count": report.research_inference_failed_count,
+        "risk_decisions": report.risk_decisions,
+        "jarvis_decisions": report.jarvis_decisions,
+        "structured_primary_success": report.structured_primary_success,
+        "structured_extraction_success": report.structured_extraction_success,
+        "structured_repair_success": report.structured_repair_success,
+        "structured_final_failure": report.structured_final_failure,
         "proposals": report.trade_proposals,
         "approved": report.approved, "rejected": report.rejected,
         "executed": report.paper_trades, "ai_cost_pence": report.ai_cost_pence,
@@ -615,6 +658,8 @@ def _run_cycle_body(
     # 5.-9. Research top candidates, one at a time, with budget preflight
     for candidate in scan.top:
         snapshot = candidate.snapshot
+        report.research_attempts += 1
+        report.pipeline_stage = "RESEARCH"
         try:
             state.record_observation(cycle_id, snapshot, decision_time_utc=current.isoformat())
             # point-in-time safety: no future data may enter a decision
@@ -676,7 +721,13 @@ def _run_cycle_body(
                 state.record_research(cycle_id, snapshot.market_id, run_id, "FAILED", reason)
                 continue
             result = research_fn(candidate, quote, config, run_id)
+            for name, count in result.structured_telemetry.items():
+                if hasattr(report, name):
+                    setattr(report, name, getattr(report, name) + int(count or 0))
             if result.status != "OK" or result.expected_probability_bps is None or result.quantity is None:
+                report.research_failures += 1
+                if (result.reason or "").startswith("INFERENCE_FAILED"):
+                    report.research_inference_failed_count += 1
                 report.ai_cost_pence += result.ai_cost_pence
                 if (result.reason or "").startswith("AI_BUDGET_UNAVAILABLE"):
                     report.budget_blocked_count += 1
@@ -687,6 +738,7 @@ def _run_cycle_body(
                 continue
 
             report.ai_researched += 1
+            report.research_successes += 1
             report.ai_cost_pence += result.ai_cost_pence
             state.record_research(cycle_id, snapshot.market_id, run_id, "OK")
             _record_shadow_decisions(config, cycle_id, snapshot, result, current)
@@ -727,12 +779,15 @@ def _run_cycle_body(
             state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
                                    candidate.score, proposal.action, "PROPOSED")
             if proposal.action != "OPEN":
+                report.research_no_trade_count += 1
                 continue
             report.trade_proposals += 1
+            report.pipeline_stage = "RISK"
 
             decision = RiskEngine(limits, duplicate_checker=broker.ledger.has_executed).evaluate(
                 proposal, broker.portfolio, quote, timestamp=current,
             )
+            report.risk_decisions += 1
             if decision.approved:
                 report.approved += 1
             else:
@@ -758,6 +813,8 @@ def _run_cycle_body(
             report.reason = f"system failure: {exc}"
             return
         except Exception as exc:  # noqa: BLE001 - per-candidate failure isolation
+            report.research_failures += 1
+            report.research_inference_failed_count += 1
             report.candidate_failures.append(
                 {"market_id": candidate.snapshot.market_id, "reason": str(exc)[:200]}
             )
@@ -811,10 +868,17 @@ def _run_cycle_body(
                         ))
 
 
-    # A cycle that reached research but could not obtain any model result is
-    # budget-blocked, not risk-rejected. This is read-only evidence.
+    # Canonical stage outcome. Pre-risk outcomes must never be relabelled as a
+    # risk rejection merely because the market-signal endpoint has candidates.
     if report.budget_blocked_count and report.ai_researched == 0 and report.trade_proposals == 0:
         report.reason = "AI_BUDGET_UNAVAILABLE"
+    elif report.trade_proposals == 0 and report.research_attempts:
+        report.reason = "NO_PROPOSAL"
+        report.pipeline_stage = "RESEARCH"
+    elif report.rejected and report.paper_trades == 0:
+        report.reason = "RISK_REJECTED"
+    elif report.trade_proposals and report.paper_trades == 0 and report.approved == 0:
+        report.reason = "RISK_REJECTED"
     report.status = "DRY_RUN" if dry_run_enabled(config) else "ACTIVE"
 
     # Phase 5: watchdog, heartbeat, AI spend alerts (operations, no self-tuning)

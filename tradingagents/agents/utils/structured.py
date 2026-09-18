@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import json
 import re
+from contextvars import ContextVar
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -41,6 +42,24 @@ NO_EXTERNAL_TOOLS = (
 )
 
 _JSON_WRAPPERS = frozenset({"data", "output", "response", "result", "structured_output"})
+
+_telemetry: ContextVar[dict[str, int] | None] = ContextVar("structured_telemetry", default=None)
+
+
+def structured_telemetry_scope(values: dict[str, int]):
+    """Collect bounded structured-output outcomes for one research run."""
+    token = _telemetry.set(values)
+    return token
+
+
+def reset_structured_telemetry(token) -> None:
+    _telemetry.reset(token)
+
+
+def _record_telemetry(name: str) -> None:
+    values = _telemetry.get()
+    if values is not None:
+        values[name] = int(values.get(name, 0)) + 1
 
 
 def _response_content(value: Any) -> str | None:
@@ -157,6 +176,7 @@ def invoke_structured_or_freetext(
             result = _normalise_structured_payload(result)
             if schema is not None:
                 result = schema.model_validate(result)
+            _record_telemetry("structured_primary_success")
             if on_structured_result is not None:
                 on_structured_result(result)
             return render(result)
@@ -187,6 +207,7 @@ def invoke_structured_or_freetext(
                     repaired = _normalise_structured_payload(repaired)
                     if schema is not None:
                         repaired = schema.model_validate(repaired)
+                    _record_telemetry("structured_repair_success")
                     if on_structured_result is not None:
                         on_structured_result(repaired)
                     return render(repaired)
@@ -201,12 +222,14 @@ def invoke_structured_or_freetext(
                             repaired = schema.model_validate(
                                 _normalise_structured_payload(repaired_text)
                             )
+                            _record_telemetry("structured_extraction_success")
                             if on_structured_result is not None:
                                 on_structured_result(repaired)
                             return render(repaired)
                         except Exception as text_repair_exc:
                             repair_exc = text_repair_exc
                     if fail_on_structured_error:
+                        _record_telemetry("structured_final_failure")
                         raise ValueError(
                             f"{agent_name}: structured output and one repair were invalid"
                         ) from repair_exc

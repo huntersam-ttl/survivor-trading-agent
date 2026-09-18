@@ -72,6 +72,8 @@ class RuntimeState:
                     ai_cost_pence INTEGER NOT NULL DEFAULT 0,
                     duration_sec REAL NOT NULL DEFAULT 0,
                     pipeline_stage TEXT NOT NULL DEFAULT 'SCAN',
+                    current_candidate_index INTEGER,
+                    progress_updated_utc TEXT,
                     research_attempts INTEGER NOT NULL DEFAULT 0,
                     research_successes INTEGER NOT NULL DEFAULT 0,
                     research_failures INTEGER NOT NULL DEFAULT 0,
@@ -128,6 +130,8 @@ class RuntimeState:
                 )
             migrations = {
                 "pipeline_stage": "TEXT NOT NULL DEFAULT 'SCAN'",
+                "current_candidate_index": "INTEGER",
+                "progress_updated_utc": "TEXT",
                 "research_attempts": "INTEGER NOT NULL DEFAULT 0",
                 "research_successes": "INTEGER NOT NULL DEFAULT 0",
                 "research_failures": "INTEGER NOT NULL DEFAULT 0",
@@ -156,6 +160,19 @@ class RuntimeState:
             conn.execute(
                 "INSERT OR REPLACE INTO cycles (cycle_id, started_utc, status) VALUES (?, ?, 'RUNNING')",
                 (cycle_id, (now or datetime.now(timezone.utc)).isoformat()),
+            )
+
+    def update_cycle_progress(
+        self, cycle_id: str, pipeline_stage: str, candidate_index: int | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Persist lightweight active-cycle progress without changing decisions."""
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE cycles SET pipeline_stage = ?, current_candidate_index = ?,
+                   progress_updated_utc = ? WHERE cycle_id = ?""",
+                (pipeline_stage, candidate_index,
+                 (now or datetime.now(timezone.utc)).isoformat(), cycle_id),
             )
 
     def finish_cycle(self, cycle_id: str, status: str, reason: str | None = None,

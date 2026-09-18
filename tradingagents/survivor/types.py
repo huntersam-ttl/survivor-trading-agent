@@ -91,6 +91,10 @@ class InferenceFailedError(SurvivorError):
         super().__init__(message, status=RouteStatus.INFERENCE_FAILED)
 
 
+class ProviderCallTimeout(InferenceFailedError):
+    """A provider call exceeded the hard total wall-clock deadline."""
+
+
 class GovernorExhaustedError(SurvivorError):
     """Raised by the global LLM cost governor when a hard limit is hit
     (token cap, call rate, daily USD budget). Fail-safe: no retry."""

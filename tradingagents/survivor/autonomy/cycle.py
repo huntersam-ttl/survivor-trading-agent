@@ -162,6 +162,26 @@ def _int_env(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _persist_cycle_progress(
+    state: RuntimeState, config: dict, cycle_id: str, stage: str,
+    candidate_index: int | None = None,
+) -> None:
+    """Persist active stage and refresh ownership heartbeat without decisions."""
+    state.update_cycle_progress(cycle_id, stage, candidate_index)
+    from tradingagents.survivor.ops.health import heartbeat_write
+
+    heartbeat_write(
+        trial_id=config.get("_trial_id") or "no-trial",
+        pid=os.getpid(),
+        mode="DRY_RUN" if dry_run_enabled(config) else "PAPER",
+        last_cycle_id=cycle_id,
+        last_cycle_status="RUNNING",
+        halt_state="HALTED" if halt_mod.is_halted(config.get("_halt_path")) else "CLEAR",
+        halt_path=config.get("_halt_path"),
+        heartbeat_path=config.get("_heartbeat_path"),
+    )
+
+
 def _parse_iso(ts: str):
     """Parse an ISO-8601 UTC timestamp into a tz-aware datetime (best-effort)."""
     try:
@@ -303,6 +323,8 @@ def _classify_inference_error(exc: Exception) -> str:
     name = type(exc).__name__
     msg = str(exc)
     low = msg.lower()
+    if type(exc).__name__ == "ProviderCallTimeout" or "provider call exceeded" in low:
+        return f"RESEARCH_PROVIDER_TIMEOUT: {msg}"
     if name == "BudgetExhaustedError" or "budget" in low and "exhaust" in low:
         return f"AI_BUDGET_UNAVAILABLE: {msg}"
     if name in ("GovernorExhaustedError",):
@@ -562,6 +584,8 @@ def run_survivor_cycle(
     try:
         try:
             state.start_cycle(cycle_id, now=current)
+            config["_halt_path"] = halt_path
+            _persist_cycle_progress(state, config, cycle_id, "SCAN")
             _run_cycle_body(
                 report, cycle_id, config, current, limits, adapter, research_fn,
                 paper_ledger, state, usage_ledger, policy, halt_path,
@@ -668,6 +692,7 @@ def _run_cycle_body(
     report.markets_discovered = scan.discovered
     report.passed_filters = len(scan.candidates)
     report.research_candidates = len(scan.top)
+    _persist_cycle_progress(state, config, cycle_id, "FILTER")
     # Decision time is NOW (after the scan): adapter snapshots are stamped at
     # fetch time, which is necessarily later than the cycle-start timestamp, so
     # the point-in-time check below must compare against this moment — not the
@@ -720,10 +745,11 @@ def _run_cycle_body(
     report.details["jarvis"] = jarvis_metrics
 
     # 5.-9. Research top candidates, one at a time, with budget preflight
-    for candidate in scan.top:
+    for candidate_index, candidate in enumerate(scan.top):
         snapshot = candidate.snapshot
         report.research_attempts += 1
         report.pipeline_stage = "RESEARCH"
+        _persist_cycle_progress(state, config, cycle_id, "RESEARCH", candidate_index)
         try:
             state.record_observation(cycle_id, snapshot, decision_time_utc=current.isoformat())
             # point-in-time safety: no future data may enter a decision
@@ -790,7 +816,7 @@ def _run_cycle_body(
                     setattr(report, name, getattr(report, name) + int(count or 0))
             if result.status != "OK":
                 report.research_failures += 1
-                if (result.reason or "").startswith("INFERENCE_FAILED"):
+                if (result.reason or "").startswith(("INFERENCE_FAILED", "RESEARCH_PROVIDER_TIMEOUT")):
                     report.research_inference_failed_count += 1
                 report.ai_cost_pence += result.ai_cost_pence
                 if (result.reason or "").startswith("AI_BUDGET_UNAVAILABLE"):
@@ -867,6 +893,7 @@ def _run_cycle_body(
                 continue
             report.trade_proposals += 1
             report.pipeline_stage = "RISK"
+            _persist_cycle_progress(state, config, cycle_id, "RISK", candidate_index)
 
             decision = RiskEngine(limits, duplicate_checker=broker.ledger.has_executed).evaluate(
                 proposal, broker.portfolio, quote, timestamp=current,
@@ -897,13 +924,14 @@ def _run_cycle_body(
             report.reason = f"system failure: {exc}"
             return
         except Exception as exc:  # noqa: BLE001 - per-candidate failure isolation
+            failure_reason = _classify_inference_error(exc)
             report.research_failures += 1
             report.research_inference_failed_count += 1
             report.candidate_failures.append(
-                {"market_id": candidate.snapshot.market_id, "reason": str(exc)[:200]}
+                {"market_id": candidate.snapshot.market_id, "reason": failure_reason[:200]}
             )
             state.record_candidate(cycle_id, candidate.snapshot.market_id, candidate.rank,
-                                   candidate.score, "NO_TRADE", "FAILED", str(exc)[:200])
+                                   candidate.score, "NO_TRADE", "FAILED", failure_reason[:200])
             continue
 
     # 10. mark open long positions at BID (no AI)

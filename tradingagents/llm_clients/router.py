@@ -18,7 +18,9 @@ configured model pools remain eligible for dynamic rotation.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 import os
+import queue
 import time
 from typing import Any
 
@@ -34,6 +36,7 @@ from tradingagents.survivor.types import (
     InferenceFailedError,
     ModelNotAllowedError,
     ProviderErrorCategory,
+    ProviderCallTimeout,
     RoleRoute,
     RouteStatus,
     SurvivorError,
@@ -42,6 +45,64 @@ from tradingagents.survivor.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_call_worker(client, messages, result_queue) -> None:
+    """Invoke one already-configured client and return only a bounded result."""
+    try:
+        result_queue.put({"ok": True, "response": client.invoke(messages)})
+    except BaseException as exc:  # noqa: BLE001 - parent classifies safely
+        result_queue.put({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "message": str(exc)[:500],
+        })
+
+
+def _provider_call_deadline_seconds() -> float:
+    try:
+        return max(0.1, float(os.environ.get("SURVIVOR_LLM_CALL_DEADLINE_SECONDS", "75")))
+    except ValueError:
+        return 75.0
+
+
+def _invoke_with_deadline(client, messages, deadline: float):
+    """Run a provider call in a killable process with a hard total deadline."""
+    context = multiprocessing.get_context("fork")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_provider_call_worker, args=(client, messages, result_queue), daemon=True,
+    )
+    deadline_at = time.monotonic() + deadline
+    result = None
+    process.start()
+    while result is None and time.monotonic() < deadline_at:
+        try:
+            result = result_queue.get(timeout=min(0.1, max(0.001, deadline_at - time.monotonic())))
+        except queue.Empty:
+            if not process.is_alive():
+                break
+    if result is not None:
+        process.join(max(0.0, deadline_at - time.monotonic()))
+    if process.is_alive():
+        process.terminate()
+        process.join(2.0)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(2.0)
+        if result is None:
+            raise ProviderCallTimeout(f"provider call exceeded {deadline:.1f}s total deadline")
+    if result is None:
+        try:
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            result = {"ok": False, "error_type": "ProviderWorkerError", "message": "worker returned no result"}
+    result_queue.close()
+    result_queue.join_thread()
+    process.close()
+    if result.get("ok"):
+        return result["response"]
+    raise RuntimeError(f"{result.get('error_type', 'ProviderError')}: {result.get('message', '')}")
 
 # Roles that may use a stronger (more expensive) model when the operator
 # configures one; every other role always uses the cheap model.
@@ -440,7 +501,14 @@ class ModelRouter:
                 client = create_llm_client(provider=provider, model=model, **llm_kwargs).get_llm()
             if llm_transform is not None:
                 client = llm_transform(client)
-            response = client.invoke(messages)
+            # Test doubles are deliberately invoked in-process so existing
+            # unit seams remain deterministic. Real provider clients always
+            # use the killable process boundary.
+            response = (
+                client.invoke(messages)
+                if mock_client_factory
+                else _invoke_with_deadline(client, messages, _provider_call_deadline_seconds())
+            )
             latency_ms = int((time.time() - start_time) * 1000)
 
             usage = getattr(response, "usage_metadata", None) or {}
@@ -482,7 +550,11 @@ class ModelRouter:
                 cat = ProviderErrorCategory.INVALID_RESPONSE
             elif "429" in err_msg or "rate limit" in err_msg or "quota" in err_msg:
                 cat = ProviderErrorCategory.RATE_LIMIT
-            elif "timeout" in err_msg:
+            elif (
+                type(exc).__name__ == "ProviderCallTimeout"
+                or "provider call exceeded" in err_msg
+                or "timeout" in err_msg
+            ):
                 cat = ProviderErrorCategory.TIMEOUT
             else:
                 cat = ProviderErrorCategory.SERVER_ERROR

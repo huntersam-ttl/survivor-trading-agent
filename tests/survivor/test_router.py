@@ -2,13 +2,14 @@
 
 import os
 import tempfile
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
 from tradingagents.llm_clients.budget import BudgetManager
 from tradingagents.llm_clients.provider_health import ProviderHealthManager
-from tradingagents.llm_clients.router import ModelRouter
+from tradingagents.llm_clients.router import ModelRouter, _invoke_with_deadline
 from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
 from tradingagents.survivor.policy import SurvivorPolicy
 from tradingagents.survivor.types import (
@@ -16,7 +17,40 @@ from tradingagents.survivor.types import (
     ModelNotAllowedError,
     ProviderErrorCategory,
     UnknownPriceError,
+    ProviderCallTimeout,
 )
+
+
+class _BlockingClient:
+    def invoke(self, messages):
+        time.sleep(10)
+
+
+@pytest.mark.unit
+def test_provider_call_has_real_total_deadline():
+    started = time.monotonic()
+    with pytest.raises(ProviderCallTimeout):
+        _invoke_with_deadline(_BlockingClient(), "hello", 0.2)
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.unit
+def test_provider_timeout_settles_budget_reservation(test_router, monkeypatch):
+    router = test_router
+
+    def timeout(*args, **kwargs):
+        raise ProviderCallTimeout("provider call exceeded 0.2s total deadline")
+
+    monkeypatch.setattr("tradingagents.llm_clients.router._invoke_with_deadline", timeout)
+    fake_client = MagicMock()
+    fake_client.get_llm.return_value = MagicMock()
+    monkeypatch.setattr("tradingagents.llm_clients.router.create_llm_client", lambda **kwargs: fake_client)
+    router.role_routes["timeout_role"] = MagicMock(
+        get_all_routes=MagicMock(return_value=[("minimax", "minimax-text-01")])
+    )
+    with pytest.raises(Exception, match="provider call exceeded"):
+        router.invoke_role("timeout_role", "hello")
+    assert router.budget_manager.get_pending_reserved_pence() == 0
 
 
 @pytest.fixture

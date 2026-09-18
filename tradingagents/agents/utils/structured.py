@@ -19,6 +19,8 @@ all three agents log the same warnings when fallback fires.
 from __future__ import annotations
 
 import logging
+import json
+import re
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -37,6 +39,75 @@ NO_EXTERNAL_TOOLS = (
     "Use only the evidence provided in this prompt. Do not call external tools "
     "or search the web; if something is missing, say so explicitly."
 )
+
+_JSON_WRAPPERS = frozenset({"data", "output", "response", "result", "structured_output"})
+
+
+def _response_content(value: Any) -> str | None:
+    """Extract text from common LangChain response shapes without inventing data."""
+    if isinstance(value, str):
+        return value
+    content = getattr(value, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return "\n".join(parts) or None
+    return None
+
+
+def _extract_json_object(text: str) -> dict | None:
+    """Extract one top-level JSON object from bounded prose/fenced output."""
+    candidate = text.strip()
+    candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I | re.S).strip()
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", candidate):
+        try:
+            value, _ = decoder.raw_decode(candidate[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _normalise_structured_payload(value: Any) -> Any:
+    """Normalise harmless provider wrappers while leaving semantics to Pydantic."""
+    if isinstance(value, dict):
+        if len(value) == 1:
+            key, nested = next(iter(value.items()))
+            if key in _JSON_WRAPPERS:
+                return _normalise_structured_payload(nested)
+        return value
+    text = _response_content(value)
+    if text:
+        payload = _extract_json_object(text)
+        if payload is not None:
+            return _normalise_structured_payload(payload)
+    return value
+
+
+def _repair_instruction(repair_prompt: Any, schema: type[BaseModel], previous: Any, error: Exception) -> str:
+    """Build a bounded, schema-exact repair request with safe failure context."""
+    previous_text = _response_content(previous)
+    if previous_text is None:
+        previous_text = "<no parseable response object was returned>"
+    previous_text = previous_text[:6000]
+    schema_json = json.dumps(schema.model_json_schema(), sort_keys=True)
+    detail = str(error)[:2000]
+    return (
+        f"{repair_prompt}\n\n"
+        "REPAIR REQUIRED. Return JSON only: one object, no commentary, no markdown fences.\n"
+        f"Exact JSON schema: {schema_json}\n"
+        f"Previous malformed response (bounded): {previous_text}\n"
+        f"Parse/validation error: {detail}\n"
+        "Do not invent missing evidence or approval. Return every required field with valid types."
+    )
 
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
@@ -83,6 +154,7 @@ def invoke_structured_or_freetext(
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
+            result = _normalise_structured_payload(result)
             if schema is not None:
                 result = schema.model_validate(result)
             if on_structured_result is not None:
@@ -104,16 +176,36 @@ def invoke_structured_or_freetext(
                             + "\n".join(f"- {field}" for field in failed_fields)
                             + "\nReturn the complete object again with ALL required fields."
                         )
+                if schema is not None:
+                    repair_instruction = _repair_instruction(
+                        repair_instruction, schema, locals().get("result"), exc
+                    )
                 try:
                     repaired = structured_llm.invoke(repair_instruction)
                     if repaired is None:
                         raise ValueError("structured repair returned no parsed result")
+                    repaired = _normalise_structured_payload(repaired)
                     if schema is not None:
                         repaired = schema.model_validate(repaired)
                     if on_structured_result is not None:
                         on_structured_result(repaired)
                     return render(repaired)
                 except Exception as repair_exc:
+                    # Some providers return useful JSON as ordinary content even
+                    # when their structured binding yields no parsed object. A
+                    # single bounded text repair preserves fail-closed validation
+                    # without accepting unvalidated prose.
+                    if schema is not None and plain_llm is not structured_llm:
+                        try:
+                            repaired_text = plain_llm.invoke(repair_instruction)
+                            repaired = schema.model_validate(
+                                _normalise_structured_payload(repaired_text)
+                            )
+                            if on_structured_result is not None:
+                                on_structured_result(repaired)
+                            return render(repaired)
+                        except Exception as text_repair_exc:
+                            repair_exc = text_repair_exc
                     if fail_on_structured_error:
                         raise ValueError(
                             f"{agent_name}: structured output and one repair were invalid"

@@ -87,6 +87,54 @@ def test_plain_text_remains_legacy_fallback():
     assert "P(YES): 55%" in result
 
 
+def test_structured_json_inside_prose_and_fences_is_normalized():
+    structured = MagicMock()
+    structured.invoke.return_value = (
+        "Here is the decision:\n```json\n"
+        + _decision().model_dump_json()
+        + "\n```"
+    )
+
+    rendered = invoke_structured_or_freetext(
+        structured, MagicMock(), "prompt", render_pm_decision, "PM",
+        schema=PredictionMarketDecision,
+    )
+
+    assert "**Probability YES**: 0.62" in rendered
+
+
+def test_empty_structured_result_uses_one_validated_text_repair():
+    structured = MagicMock()
+    structured.invoke.return_value = None
+    plain = MagicMock()
+    plain.invoke.return_value = MagicMock(content=_decision().model_dump_json())
+
+    rendered = invoke_structured_or_freetext(
+        structured, plain, "prompt", render_pm_decision, "PM",
+        schema=PredictionMarketDecision,
+        repair_prompt="repair",
+        fail_on_structured_error=True,
+    )
+
+    assert "**Probability YES**: 0.62" in rendered
+    assert "JSON only" in structured.invoke.call_args.args[0]
+
+
+def test_text_repair_still_fails_closed_on_missing_semantics():
+    structured = MagicMock()
+    structured.invoke.return_value = None
+    plain = MagicMock()
+    plain.invoke.return_value = MagicMock(content='{"rating":"Hold"}')
+
+    with pytest.raises(ValueError, match="structured output and one repair"):
+        invoke_structured_or_freetext(
+            structured, plain, "prompt", render_pm_decision, "PM",
+            schema=PredictionMarketDecision,
+            repair_prompt="repair",
+            fail_on_structured_error=True,
+        )
+
+
 def test_default_research_accepts_typed_probability(monkeypatch):
     from tradingagents.graph import trading_graph as tg_mod
     from tradingagents.survivor.autonomy.cycle import _default_research

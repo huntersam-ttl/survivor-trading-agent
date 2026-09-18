@@ -199,3 +199,25 @@ def test_polymarket_slow_read_hits_wall_clock_deadline(monkeypatch):
         adapter.list_markets(limit=100)
     assert time.monotonic() - started < 3.5
     assert exc_info.value.category == "GAMMA_TOTAL_TIMEOUT"
+
+
+def test_gamma_request_passes_total_timeout_to_requests(monkeypatch):
+    from tradingagents.dataflows import polymarket as gamma
+
+    seen = {}
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def raise_for_status(self): pass
+        def json(self): return []
+
+    def fake_get(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return Response()
+
+    monkeypatch.setattr(gamma.requests, "get", fake_get)
+    gamma._request("markets", {}, deadline_seconds=12)
+    assert seen["timeout"].total == 12
+    assert seen["timeout"]._connect == 12
+    assert seen["timeout"]._read == 12

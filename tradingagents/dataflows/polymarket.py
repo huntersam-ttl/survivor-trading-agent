@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import requests
+from urllib3.util import Timeout as Urllib3Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,17 @@ def request_deadline(seconds: float):
 
 
 def _request(path: str, params: dict, *, deadline_seconds: float | None = None) -> dict:
-    with request_deadline(deadline_seconds or PAGE_DEADLINE_SECONDS):
+    deadline = float(deadline_seconds or PAGE_DEADLINE_SECONDS)
+    # Requests otherwise treats a scalar/tuple timeout as a per-socket-read
+    # budget. urllib3's total timeout carries the wall-clock budget through the
+    # exact Requests adapter, including slow-drip responses.
+    timeout = Urllib3Timeout(
+        total=deadline, connect=min(REQUEST_TIMEOUT, deadline), read=min(REQUEST_TIMEOUT, deadline),
+    )
+    with request_deadline(deadline):
         with requests.get(
             f"{GAMMA_BASE}/{path}", params=params,
-            timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+            timeout=timeout,
         ) as response:
             response.raise_for_status()
             return response.json()

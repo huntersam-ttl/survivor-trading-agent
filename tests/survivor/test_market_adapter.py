@@ -184,3 +184,18 @@ def test_polymarket_invalid_json_is_typed_and_bounded(monkeypatch):
         adapter.list_markets(limit=100)
     assert exc_info.value.category == "GAMMA_INVALID_JSON"
     assert len(exc_info.value.telemetry["pages"]) == 2
+
+
+def test_polymarket_slow_read_hits_wall_clock_deadline(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
+    from tradingagents.dataflows import polymarket as gamma
+    import time
+
+    monkeypatch.setenv("SURVIVOR_GAMMA_PAGE_DEADLINE_SECONDS", "1")
+    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: time.sleep(2))
+    adapter = module.PolymarketAdapter()
+    started = time.monotonic()
+    with pytest.raises(module.GammaPageError) as exc_info:
+        adapter.list_markets(limit=100)
+    assert time.monotonic() - started < 3.5
+    assert exc_info.value.category == "GAMMA_TOTAL_TIMEOUT"

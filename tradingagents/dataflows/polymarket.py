@@ -47,6 +47,9 @@ def request_deadline(seconds: float):
         raise GammaTotalTimeout(f"Gamma request exceeded {seconds:.1f}s wall-clock deadline")
 
     signal.signal(signal.SIGALRM, _raise_timeout)
+    # Prevent macOS/Python from transparently restarting the interrupted SSL
+    # read (PEP 475), which would otherwise defeat the wall-clock deadline.
+    signal.siginterrupt(signal.SIGALRM, True)
     signal.setitimer(signal.ITIMER_REAL, max(0.001, float(seconds)))
     try:
         yield

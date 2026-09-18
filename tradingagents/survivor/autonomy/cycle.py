@@ -96,6 +96,11 @@ class CycleReport:
     structured_extraction_success: int = 0
     structured_repair_success: int = 0
     structured_final_failure: int = 0
+    structured_failure_missing_field: int = 0
+    structured_failure_invalid_enum: int = 0
+    structured_failure_invalid_type: int = 0
+    structured_failure_truncated_json: int = 0
+    structured_failure_provider_parse: int = 0
     trade_proposals: int = 0
     approved: int = 0
     rejected: int = 0
@@ -200,6 +205,24 @@ def _record_shadow_decisions(config: dict, cycle_id: str, snapshot, result, curr
 
 
 _P_YES_RE = re.compile(r"P\s*\(\s*YES\s*\)\s*[:=]\s*([0-9]{1,3}(?:\.[0-9]+)?)\s*%", re.IGNORECASE)
+_NO_TRADE_RE = re.compile(r"(?:\bNO[_ ]TRADE\b|\*\*Rating\*\*\s*:\s*Hold)", re.IGNORECASE)
+
+
+def _is_no_trade_decision(decision_text: str | None, typed_decision: Any = None) -> bool:
+    """Recognize an explicit Hold/NO_TRADE without inferring a trade."""
+    rating = getattr(typed_decision, "rating", None)
+    if rating is not None and str(getattr(rating, "value", rating)).casefold() == "hold":
+        # Some providers retain a probability on a Hold object. Preserve that
+        # established typed-probability path; a Hold with no probability is
+        # the explicit no-entry outcome handled by the cycle.
+        return getattr(typed_decision, "probability_yes", None) is None
+    if isinstance(typed_decision, dict):
+        rating = typed_decision.get("rating")
+        if str(getattr(rating, "value", rating)).casefold() in {"no_trade", "no trade"}:
+            return True
+        if str(getattr(rating, "value", rating)).casefold() == "hold":
+            return typed_decision.get("probability_yes") is None
+    return bool(_NO_TRADE_RE.search(decision_text or ""))
 
 
 def _prediction_market_internal_id(market_id: str) -> str:
@@ -420,6 +443,11 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         "structured_extraction_success": 0,
         "structured_repair_success": 0,
         "structured_final_failure": 0,
+        "structured_failure_missing_field": 0,
+        "structured_failure_invalid_enum": 0,
+        "structured_failure_invalid_type": 0,
+        "structured_failure_truncated_json": 0,
+        "structured_failure_provider_parse": 0,
     }
     token = None
     try:
@@ -452,6 +480,11 @@ def _default_research(candidate: Candidate, quote: QuoteSnapshot, config: dict, 
         probability = float(probability) if probability is not None else None
     except (TypeError, ValueError):
         probability = None
+    if _is_no_trade_decision(decision_text, typed_decision):
+        return ResearchResult(
+            decision_text="NO_TRADE", ai_cost_pence=ai_cost_pence, run_id=run_id,
+            status="OK", structured_telemetry=telemetry,
+        )
     if probability is not None and 0.0 <= probability <= 1.0:
         probability_bps = round(probability * 10000)
     else:
@@ -558,12 +591,20 @@ def run_survivor_cycle(
         "structured_extraction_success": report.structured_extraction_success,
         "structured_repair_success": report.structured_repair_success,
         "structured_final_failure": report.structured_final_failure,
+        "structured_failure_missing_field": report.structured_failure_missing_field,
+        "structured_failure_invalid_enum": report.structured_failure_invalid_enum,
+        "structured_failure_invalid_type": report.structured_failure_invalid_type,
+        "structured_failure_truncated_json": report.structured_failure_truncated_json,
+        "structured_failure_provider_parse": report.structured_failure_provider_parse,
         "proposals": report.trade_proposals,
         "approved": report.approved, "rejected": report.rejected,
         "executed": report.paper_trades, "ai_cost_pence": report.ai_cost_pence,
         "duration_sec": report.duration_sec,
     }
-    state.finish_cycle(cycle_id, report.status, report.reason, metrics, now=current)
+    state.finish_cycle(
+        cycle_id, report.status, report.reason, metrics,
+        now=datetime.now(timezone.utc),
+    )
     return report
 
 
@@ -724,13 +765,33 @@ def _run_cycle_body(
             for name, count in result.structured_telemetry.items():
                 if hasattr(report, name):
                     setattr(report, name, getattr(report, name) + int(count or 0))
-            if result.status != "OK" or result.expected_probability_bps is None or result.quantity is None:
+            if result.status != "OK":
                 report.research_failures += 1
                 if (result.reason or "").startswith("INFERENCE_FAILED"):
                     report.research_inference_failed_count += 1
                 report.ai_cost_pence += result.ai_cost_pence
                 if (result.reason or "").startswith("AI_BUDGET_UNAVAILABLE"):
                     report.budget_blocked_count += 1
+                report.candidate_failures.append(
+                    {"market_id": snapshot.market_id, "reason": result.reason or "RESEARCH_FAILED"}
+                )
+                state.record_research(cycle_id, snapshot.market_id, run_id, "FAILED", result.reason)
+                continue
+
+            if _is_no_trade_decision(result.decision_text) and (
+                result.expected_probability_bps is None or result.quantity is None
+            ):
+                report.ai_researched += 1
+                report.research_successes += 1
+                report.research_no_trade_count += 1
+                report.ai_cost_pence += result.ai_cost_pence
+                state.record_research(cycle_id, snapshot.market_id, run_id, "OK", "NO_TRADE")
+                state.record_candidate(cycle_id, snapshot.market_id, candidate.rank,
+                                       candidate.score, "NO_TRADE", "PROPOSED", "NO_TRADE")
+                continue
+
+            if result.expected_probability_bps is None or result.quantity is None:
+                report.research_failures += 1
                 report.candidate_failures.append(
                     {"market_id": snapshot.market_id, "reason": result.reason or "RESEARCH_FAILED"}
                 )

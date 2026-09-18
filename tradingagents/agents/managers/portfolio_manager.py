@@ -71,7 +71,7 @@ def create_portfolio_manager(llm):
 
 Ground every conclusion in specific evidence from the analysts. Commit to a directional call only when the evidence clearly supports one; choose Hold when the case is balanced, materially conflicting, ambiguous, or insufficient to justify changing exposure, rather than forcing a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
 
-STRUCTURED OUTPUT CONTRACT: Return every required schema field. Never omit investment_thesis; it must be a non-empty explanation grounded in this prompt. For a binary prediction market, also return probability_yes and confidence as numbers from 0.0 to 1.0, plus non-empty key_evidence and key_risks lists. Do not place these fields only in prose.
+STRUCTURED OUTPUT CONTRACT: Return a complete object. Never omit investment_thesis; it must be a non-empty explanation grounded in this prompt. For a binary prediction market, return confidence plus non-empty key_evidence and key_risks for every rating. Return probability_yes for an actionable rating; for Hold/NO_TRADE it may be null because no entry probability is being asserted. Do not place these fields only in prose.
 
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 

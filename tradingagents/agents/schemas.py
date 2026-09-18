@@ -21,7 +21,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -242,20 +242,20 @@ class PortfolioDecision(BaseModel):
 class PredictionMarketDecision(PortfolioDecision):
     """Complete typed decision contract for binary prediction markets."""
 
-    probability_yes: float = Field(
-        ..., ge=0.0, le=1.0,
+    probability_yes: float | None = Field(
+        default=None, ge=0.0, le=1.0,
         description="Probability from 0.0 to 1.0 that this binary event resolves YES.",
     )
-    confidence: float = Field(
-        ..., ge=0.0, le=1.0,
+    confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0,
         description="Confidence from 0.0 to 1.0 in the probability estimate.",
     )
-    key_evidence: list[str] = Field(
-        ..., min_length=1,
+    key_evidence: list[str] | None = Field(
+        default=None, min_length=1,
         description="One or more concrete evidence points supporting the estimate.",
     )
-    key_risks: list[str] = Field(
-        ..., min_length=1,
+    key_risks: list[str] | None = Field(
+        default=None, min_length=1,
         description="One or more concrete uncertainties or risks to the estimate.",
     )
 
@@ -272,6 +272,34 @@ class PredictionMarketDecision(PortfolioDecision):
         if isinstance(value, str) and value.strip():
             return [value]
         return value
+
+    @field_validator("rating", mode="before")
+    @classmethod
+    def _normalise_no_trade_rating(cls, value):
+        """Accept only the harmless provider aliases for a no-trade Hold."""
+        if isinstance(value, str) and value.strip().casefold().replace("_", " ") in {
+            "no trade", "notrade"
+        }:
+            return PortfolioRating.HOLD
+        return value
+
+    @model_validator(mode="after")
+    def _require_semantics_for_every_decision(self):
+        """Keep semantic evidence mandatory; probability is irrelevant to Hold."""
+        missing = []
+        if not self.investment_thesis.strip():
+            missing.append("investment_thesis")
+        if not self.key_evidence:
+            missing.append("key_evidence")
+        if not self.key_risks:
+            missing.append("key_risks")
+        if self.confidence is None:
+            missing.append("confidence")
+        if self.rating is not PortfolioRating.HOLD and self.probability_yes is None:
+            missing.append("probability_yes")
+        if missing:
+            raise ValueError("missing required decision semantics: " + ", ".join(missing))
+        return self
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -294,13 +322,13 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
     if isinstance(decision, PredictionMarketDecision):
+        if decision.probability_yes is not None:
+            parts.extend(["", f"**Probability YES**: {decision.probability_yes}"])
         parts.extend([
-            "", f"**Probability YES**: {decision.probability_yes}",
-            "", f"**Confidence**: {decision.confidence}",
-            "", "**Key Evidence**:",
-            *[f"- {item}" for item in decision.key_evidence],
+            "", f"**Confidence**: {decision.confidence}", "", "**Key Evidence**:",
+            *[f"- {item}" for item in (decision.key_evidence or [])],
             "", "**Key Risks**:",
-            *[f"- {item}" for item in decision.key_risks],
+            *[f"- {item}" for item in (decision.key_risks or [])],
         ])
     return "\n".join(parts)
 

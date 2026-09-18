@@ -83,6 +83,11 @@ class RuntimeState:
                     structured_extraction_success INTEGER NOT NULL DEFAULT 0,
                     structured_repair_success INTEGER NOT NULL DEFAULT 0,
                     structured_final_failure INTEGER NOT NULL DEFAULT 0
+                    ,structured_failure_missing_field INTEGER NOT NULL DEFAULT 0
+                    ,structured_failure_invalid_enum INTEGER NOT NULL DEFAULT 0
+                    ,structured_failure_invalid_type INTEGER NOT NULL DEFAULT 0
+                    ,structured_failure_truncated_json INTEGER NOT NULL DEFAULT 0
+                    ,structured_failure_provider_parse INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -133,6 +138,11 @@ class RuntimeState:
                 "structured_extraction_success": "INTEGER NOT NULL DEFAULT 0",
                 "structured_repair_success": "INTEGER NOT NULL DEFAULT 0",
                 "structured_final_failure": "INTEGER NOT NULL DEFAULT 0",
+                "structured_failure_missing_field": "INTEGER NOT NULL DEFAULT 0",
+                "structured_failure_invalid_enum": "INTEGER NOT NULL DEFAULT 0",
+                "structured_failure_invalid_type": "INTEGER NOT NULL DEFAULT 0",
+                "structured_failure_truncated_json": "INTEGER NOT NULL DEFAULT 0",
+                "structured_failure_provider_parse": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -162,6 +172,9 @@ class RuntimeState:
                     risk_decisions = ?, jarvis_decisions = ?,
                     structured_primary_success = ?, structured_extraction_success = ?,
                     structured_repair_success = ?, structured_final_failure = ?
+                    ,structured_failure_missing_field = ?, structured_failure_invalid_enum = ?
+                    ,structured_failure_invalid_type = ?, structured_failure_truncated_json = ?
+                    ,structured_failure_provider_parse = ?
                 WHERE cycle_id = ?
                 """,
                 (
@@ -181,6 +194,11 @@ class RuntimeState:
                     metrics.get("structured_extraction_success", 0),
                     metrics.get("structured_repair_success", 0),
                     metrics.get("structured_final_failure", 0),
+                    metrics.get("structured_failure_missing_field", 0),
+                    metrics.get("structured_failure_invalid_enum", 0),
+                    metrics.get("structured_failure_invalid_type", 0),
+                    metrics.get("structured_failure_truncated_json", 0),
+                    metrics.get("structured_failure_provider_parse", 0),
                     cycle_id,
                 ),
             )

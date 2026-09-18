@@ -57,3 +57,18 @@ def test_proposal_then_risk_rejection_keeps_risk_reason(tmp_path, monkeypatch):
     assert report.trade_proposals == 1
     assert report.risk_decisions == 1
     assert report.reason in {None, "RISK_REJECTED"}
+
+
+def test_completed_cycle_persists_distinct_finish_timestamp(tmp_path, monkeypatch):
+    monkeypatch.setattr("tradingagents.survivor.autonomy.halt.HALT_PATH", str(tmp_path / "HALT"))
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    report = run_survivor_cycle(
+        {"survivor_autonomy_enabled": True},
+        adapter=FakeMarketAdapter([make_snapshot("mkt-0")]),
+        research_fn=lambda *_: ResearchResult(status="OK", decision_text="NO_TRADE"),
+        runtime_state=state,
+        paper_ledger_path=str(tmp_path / "paper.db"),
+    )
+    row = state.last_cycle()
+    assert report.reason == "NO_PROPOSAL"
+    assert row["finished_utc"] > row["started_utc"]

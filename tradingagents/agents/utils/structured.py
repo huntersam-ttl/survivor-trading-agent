@@ -62,6 +62,28 @@ def _record_telemetry(name: str) -> None:
         values[name] = int(values.get(name, 0)) + 1
 
 
+def _record_failure_category(error: Exception) -> None:
+    """Record one bounded, diagnostic category for a final structured failure."""
+    category = "structured_failure_provider_parse"
+    try:
+        errors = error.errors() if hasattr(error, "errors") else []
+        types = {str(item.get("type", "")) for item in errors}
+        messages = " ".join(str(item.get("msg", "")) for item in errors).lower()
+        if any(t == "missing" or t.endswith(".missing") for t in types):
+            category = "structured_failure_missing_field"
+        elif any("enum" in t for t in types) or "enum" in messages:
+            category = "structured_failure_invalid_enum"
+        elif any("type" in t or "parsing" in t for t in types):
+            category = "structured_failure_invalid_type"
+        elif isinstance(error, json.JSONDecodeError) or any(
+            marker in messages for marker in ("json", "truncat", "unclosed", "unterminated")
+        ):
+            category = "structured_failure_truncated_json"
+    except Exception:  # diagnostics must never affect fail-closed behavior
+        pass
+    _record_telemetry(category)
+
+
 def _response_content(value: Any) -> str | None:
     """Extract text from common LangChain response shapes without inventing data."""
     if isinstance(value, str):
@@ -229,6 +251,7 @@ def invoke_structured_or_freetext(
                         except Exception as text_repair_exc:
                             repair_exc = text_repair_exc
                     if fail_on_structured_error:
+                        _record_failure_category(repair_exc)
                         _record_telemetry("structured_final_failure")
                         raise ValueError(
                             f"{agent_name}: structured output and one repair were invalid"

@@ -78,6 +78,32 @@ def test_singleton_text_evidence_from_provider_is_normalized_without_invention()
     assert decision.key_risks == ["one unresolved risk"]
 
 
+def test_no_trade_allows_probability_to_be_absent_but_keeps_semantics_required():
+    decision = PredictionMarketDecision(
+        rating="NO_TRADE",
+        executive_summary="Do not enter this market.",
+        investment_thesis="The available evidence is too conflicting to justify an entry.",
+        confidence="0.4",
+        key_evidence=["The evidence is mixed."],
+        key_risks=["The outcome remains uncertain."],
+    )
+    assert decision.rating is PortfolioRating.HOLD
+    assert decision.probability_yes is None
+    assert "Probability YES" not in render_pm_decision(decision)
+
+
+def test_actionable_prediction_still_requires_probability():
+    with pytest.raises(ValidationError, match="probability_yes"):
+        PredictionMarketDecision(
+            rating="Buy",
+            executive_summary="Enter the market.",
+            investment_thesis="The evidence supports an entry.",
+            confidence=0.7,
+            key_evidence=["Positive evidence."],
+            key_risks=["The event could still resolve otherwise."],
+        )
+
+
 def test_plain_text_remains_legacy_fallback():
     plain = MagicMock()
     plain.invoke.return_value = MagicMock(content="**Rating**: Hold\nP(YES): 55%")

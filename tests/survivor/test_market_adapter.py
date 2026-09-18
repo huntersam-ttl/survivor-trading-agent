@@ -220,4 +220,4 @@ def test_gamma_request_passes_total_timeout_to_requests(monkeypatch):
     gamma._request("markets", {}, deadline_seconds=12)
     assert seen["timeout"].total == 12
     assert seen["timeout"]._connect == 12
-    assert seen["timeout"]._read == 12
+    assert seen["timeout"]._read is None

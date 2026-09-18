@@ -67,7 +67,7 @@ def _request(path: str, params: dict, *, deadline_seconds: float | None = None) 
     # budget. urllib3's total timeout carries the wall-clock budget through the
     # exact Requests adapter, including slow-drip responses.
     timeout = Urllib3Timeout(
-        total=deadline, connect=min(REQUEST_TIMEOUT, deadline), read=min(REQUEST_TIMEOUT, deadline),
+        total=deadline, connect=min(REQUEST_TIMEOUT, deadline), read=None,
     )
     with request_deadline(deadline):
         with requests.get(

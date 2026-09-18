@@ -93,18 +93,32 @@ def _run_gamma_page(path: str, params: dict, deadline: float, worker=None) -> di
     process = context.Process(target=target, args=(path, params, result_queue), daemon=True)
     started = time.monotonic()
     process.start()
-    process.join(max(0.001, float(deadline)))
+    result = None
+    deadline_at = started + max(0.001, float(deadline))
+    # Drain the result queue while the child is alive. A successful page can
+    # contain hundreds of rows; joining first would let Queue.put block on its
+    # pipe and falsely turn a completed HTTP request into a deadline timeout.
+    while result is None and time.monotonic() < deadline_at:
+        remaining = max(0.001, deadline_at - time.monotonic())
+        try:
+            result = result_queue.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            if not process.is_alive():
+                break
+    if result is not None:
+        process.join(max(0.0, deadline_at - time.monotonic()))
     if process.is_alive():
         process.terminate()
         process.join(2.0)
         if process.is_alive() and hasattr(process, "kill"):
             process.kill()
             process.join(2.0)
-        result = {
-            "ok": False, "category": "GAMMA_TOTAL_TIMEOUT",
-            "message": f"worker exceeded {deadline:.1f}s deadline",
-        }
-    else:
+        if result is None:
+            result = {
+                "ok": False, "category": "GAMMA_TOTAL_TIMEOUT",
+                "message": f"worker exceeded {deadline:.1f}s deadline",
+            }
+    if result is None:
         try:
             result = result_queue.get_nowait()
         except queue.Empty:

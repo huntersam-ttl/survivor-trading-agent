@@ -18,6 +18,14 @@ def _test_success_worker(path, params, result_queue):
     result_queue.put({"ok": True, "status": 200, "rows": [{"id": "ok"}], "duration_ms": 1.0})
 
 
+def _test_large_success_worker(path, params, result_queue):
+    result_queue.put({
+        "ok": True, "status": 200,
+        "rows": [{"id": str(i), "description": "x" * 6000} for i in range(100)],
+        "duration_ms": 1.0,
+    })
+
+
 def _test_slow_worker(path, params, result_queue):
     time.sleep(10)
 
@@ -203,6 +211,14 @@ def test_polymarket_child_success_is_cleanly_reaped():
     assert result["ok"] is True
     assert result["status"] == 200
     assert result["rows"] == [{"id": "ok"}]
+
+
+def test_polymarket_large_child_result_is_drained_before_join():
+    from tradingagents.survivor.markets import polymarket_adapter as module
+
+    result = module._run_gamma_page("markets", {}, 2, worker=_test_large_success_worker)
+    assert result["ok"] is True
+    assert len(result["rows"]) == 100
 
 
 def test_polymarket_timeout_retries_and_accepts_success(monkeypatch):

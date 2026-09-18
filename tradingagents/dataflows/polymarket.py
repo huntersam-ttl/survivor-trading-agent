@@ -11,6 +11,9 @@ outcomes (a "Yes" at 0.76 means the market prices a 76% chance).
 """
 import json
 import logging
+import signal
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import requests
@@ -21,17 +24,47 @@ GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 # Network timeout (seconds), consistent with the other vendors.
 REQUEST_TIMEOUT = 30
+PAGE_DEADLINE_SECONDS = 30
 
 # Default number of markets to return, ranked by traded volume.
 DEFAULT_LIMIT = 6
 
 
-def _request(path: str, params: dict) -> dict:
-    response = requests.get(
-        f"{GAMMA_BASE}/{path}", params=params, timeout=REQUEST_TIMEOUT
-    )
-    response.raise_for_status()
-    return response.json()
+class GammaTotalTimeout(TimeoutError):
+    """The full Gamma request exceeded its wall-clock page deadline."""
+
+
+@contextmanager
+def request_deadline(seconds: float):
+    """Bound one synchronous request without leaving worker threads behind."""
+    if threading.current_thread() is not threading.main_thread() or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(_signum, _frame):
+        raise GammaTotalTimeout(f"Gamma request exceeded {seconds:.1f}s wall-clock deadline")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, float(seconds)))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def _request(path: str, params: dict, *, deadline_seconds: float | None = None) -> dict:
+    with request_deadline(deadline_seconds or PAGE_DEADLINE_SECONDS):
+        with requests.get(
+            f"{GAMMA_BASE}/{path}", params=params,
+            timeout=(REQUEST_TIMEOUT, REQUEST_TIMEOUT),
+        ) as response:
+            response.raise_for_status()
+            return response.json()
 
 
 def _parse_json_list(value) -> list:

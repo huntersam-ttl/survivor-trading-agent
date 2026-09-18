@@ -600,6 +600,7 @@ def run_survivor_cycle(
         "approved": report.approved, "rejected": report.rejected,
         "executed": report.paper_trades, "ai_cost_pence": report.ai_cost_pence,
         "duration_sec": report.duration_sec,
+        "scan_telemetry": report.details.get("scan", {}),
     }
     state.finish_cycle(
         cycle_id, report.status, report.reason, metrics,
@@ -641,7 +642,29 @@ def _run_cycle_body(
         max_research_candidates_per_cycle=_int_env("SURVIVOR_MAX_RESEARCH_PER_CYCLE", 3),
     )
     open_symbols = frozenset(s for s, p in broker.portfolio.positions.items() if p.quantity > 0)
-    scan = scanner.scan(now=current, open_position_symbols=open_symbols, trading_halted=trading_halted)
+    try:
+        scan = scanner.scan(now=current, open_position_symbols=open_symbols, trading_halted=trading_halted)
+    except Exception as exc:
+        # Provider discovery is fail-closed: never continue from an incomplete
+        # paginated universe, and still complete the cycle/heartbeat normally.
+        from tradingagents.survivor.markets.polymarket_adapter import GammaPageError
+        if not isinstance(exc, GammaPageError):
+            raise
+        report.status = "ACTIVE"
+        report.reason = "PROVIDER_TIMEOUT" if "TIMEOUT" in exc.category else exc.category
+        report.pipeline_stage = "SCAN"
+        report.details["scan"] = exc.telemetry
+        from tradingagents.survivor.ops.health import heartbeat_write, record_market_probe, watchdog_record
+        watchdog_record(state, "consecutive_cycle_failures", success=False)
+        record_market_probe(state, {"fresh": False, "schema_valid": False})
+        heartbeat_write(
+            trial_id=config.get("_trial_id") or "no-trial", pid=os.getpid(),
+            mode="DRY_RUN" if dry_run_enabled(config) else "PAPER",
+            last_cycle_id=cycle_id, last_cycle_status=report.status,
+            halt_state="HALTED" if halt_mod.is_halted(halt_path) else "CLEAR",
+            halt_path=halt_path, heartbeat_path=config.get("_heartbeat_path"),
+        )
+        return
     report.markets_discovered = scan.discovered
     report.passed_filters = len(scan.candidates)
     report.research_candidates = len(scan.top)

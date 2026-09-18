@@ -72,3 +72,29 @@ def test_completed_cycle_persists_distinct_finish_timestamp(tmp_path, monkeypatc
     row = state.last_cycle()
     assert report.reason == "NO_PROPOSAL"
     assert row["finished_utc"] > row["started_utc"]
+
+
+def test_provider_timeout_finishes_cycle_without_downstream_work(tmp_path, monkeypatch):
+    from tradingagents.survivor.markets.polymarket_adapter import GammaPageError
+
+    monkeypatch.setattr("tradingagents.survivor.autonomy.halt.HALT_PATH", str(tmp_path / "HALT"))
+
+    class FailingAdapter(FakeMarketAdapter):
+        def list_markets(self, limit=100):
+            raise GammaPageError("GAMMA_TOTAL_TIMEOUT", "page deadline", {
+                "pages_attempted": 1, "pages_completed": 0, "rows_fetched": 0,
+                "failure_page": 1, "failure_category": "GAMMA_TOTAL_TIMEOUT",
+                "pages": [], "scan_duration_ms": 30000,
+            })
+
+    state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
+    report = run_survivor_cycle(
+        {"survivor_autonomy_enabled": True}, adapter=FailingAdapter([]),
+        runtime_state=state, paper_ledger_path=str(tmp_path / "paper.db"),
+    )
+    row = state.last_cycle()
+    assert report.reason == "PROVIDER_TIMEOUT"
+    assert report.pipeline_stage == "SCAN"
+    assert report.research_attempts == 0
+    assert report.trade_proposals == 0
+    assert row["finished_utc"] > row["started_utc"]

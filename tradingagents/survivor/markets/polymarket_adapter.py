@@ -12,7 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import time
 from datetime import datetime, timezone
+
+import requests
 
 from tradingagents.dataflows import polymarket as gamma
 from tradingagents.survivor.markets.adapter import MarketAdapter
@@ -27,6 +32,24 @@ PROVIDER = "polymarket"
 MARKET_TYPE = "prediction_binary"
 PAGE_SIZE = 100
 DEFAULT_UNIVERSE_LIMIT = 1000
+PAGE_RETRIES = 1
+logger = logging.getLogger(__name__)
+
+
+class GammaPageError(RuntimeError):
+    """A required Gamma page could not be fetched safely."""
+
+    def __init__(self, category: str, message: str, telemetry: dict):
+        super().__init__(message)
+        self.category = category
+        self.telemetry = telemetry
+
+
+def _page_deadline_seconds() -> float:
+    try:
+        return max(1.0, float(os.environ.get("SURVIVOR_GAMMA_PAGE_DEADLINE_SECONDS", "30")))
+    except ValueError:
+        return 30.0
 
 
 def _iso_to_iso(value: str | None) -> str | None:
@@ -44,6 +67,67 @@ class PolymarketAdapter(MarketAdapter):
     provider = PROVIDER
     market_type = MARKET_TYPE
 
+    def __init__(self):
+        self.last_scan_telemetry = {
+            "pages_attempted": 0, "pages_completed": 0, "rows_fetched": 0,
+            "scan_duration_ms": 0.0, "failure_page": None, "failure_category": None,
+            "pages": [],
+        }
+
+    def _fetch_page(self, page: int, offset: int, params: dict) -> list[dict]:
+        deadline = _page_deadline_seconds()
+        retries = min(PAGE_RETRIES, 1)
+        last_error = None
+        for attempt in range(retries + 1):
+            started = time.monotonic()
+            status = "OK"
+            category = None
+            rows = 0
+            try:
+                with gamma.request_deadline(deadline):
+                    data = gamma._request("markets", params)
+                if not isinstance(data, list):
+                    category = "GAMMA_INVALID_JSON"
+                    raise ValueError("Gamma markets response was not a JSON list")
+                rows = len(data)
+                self.last_scan_telemetry["pages"].append({
+                    "page": page, "offset": offset, "attempt": attempt + 1,
+                    "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                    "rows": rows, "status": status, "category": category,
+                })
+                self.last_scan_telemetry["pages_completed"] += 1
+                self.last_scan_telemetry["rows_fetched"] += rows
+                return data
+            except gamma.GammaTotalTimeout as exc:
+                category, last_error = "GAMMA_TOTAL_TIMEOUT", exc
+            except requests.exceptions.ConnectTimeout as exc:
+                category, last_error = "GAMMA_CONNECT_TIMEOUT", exc
+            except requests.exceptions.ReadTimeout as exc:
+                category, last_error = "GAMMA_READ_TIMEOUT", exc
+            except requests.exceptions.HTTPError as exc:
+                category, last_error = "GAMMA_HTTP_ERROR", exc
+            except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as exc:
+                category, last_error = "GAMMA_INVALID_JSON", exc
+            status = "ERROR"
+            self.last_scan_telemetry["pages"].append({
+                "page": page, "offset": offset, "attempt": attempt + 1,
+                "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                "rows": rows, "status": status, "category": category,
+            })
+            if attempt < retries:
+                logger.warning("Gamma page %s failed (%s); retrying once", page, category)
+                continue
+            self.last_scan_telemetry["failure_page"] = page
+            self.last_scan_telemetry["failure_category"] = category
+            self.last_scan_telemetry["scan_duration_ms"] = round(
+                (time.monotonic() - self.last_scan_telemetry.get("_started_scan", time.monotonic())) * 1000, 2
+            )
+            self.last_scan_telemetry.pop("_started_scan", None)
+            raise GammaPageError(
+                category, f"Gamma page {page} offset {offset}: {category}",
+                self.last_scan_telemetry,
+            ) from last_error
+
     def list_markets(self, limit: int = DEFAULT_UNIVERSE_LIMIT) -> list[dict]:
         """Fetch open binary markets from the public Gamma ``/markets`` collection
         (keyless, read-only), ordered by traded volume.
@@ -57,19 +141,23 @@ class PolymarketAdapter(MarketAdapter):
             return []
         markets: list[dict] = []
         seen: set[str] = set()
+        started_scan = time.monotonic()
+        self.last_scan_telemetry = {
+            "pages_attempted": 0, "pages_completed": 0, "rows_fetched": 0,
+            "scan_duration_ms": 0.0, "failure_page": None, "failure_category": None,
+            "pages": [],
+        }
+        self.last_scan_telemetry["_started_scan"] = started_scan
         for offset in range(0, target, PAGE_SIZE):
-            data = gamma._request(
-                "markets",
-                {
+            page = offset // PAGE_SIZE + 1
+            self.last_scan_telemetry["pages_attempted"] = page
+            data = self._fetch_page(page, offset, {
                     "limit": min(PAGE_SIZE, target - offset),
                     "offset": offset,
                     "closed": "false",
                     "order": "volumeNum",
                     "ascending": "false",
-                },
-            )
-            if not isinstance(data, list):
-                break
+                })
             for market in data:
                 market_id = str(market.get("id") or "")
                 if market_id and market_id in seen:
@@ -79,6 +167,8 @@ class PolymarketAdapter(MarketAdapter):
                 markets.append(market)
             if len(data) < PAGE_SIZE:
                 break
+        self.last_scan_telemetry["scan_duration_ms"] = round((time.monotonic() - started_scan) * 1000, 2)
+        self.last_scan_telemetry.pop("_started_scan", None)
         now = datetime.now(timezone.utc)
         forward = [m for m in markets if gamma._is_forward_looking(m, now)]
         forward.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)

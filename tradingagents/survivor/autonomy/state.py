@@ -88,6 +88,7 @@ class RuntimeState:
                     ,structured_failure_invalid_type INTEGER NOT NULL DEFAULT 0
                     ,structured_failure_truncated_json INTEGER NOT NULL DEFAULT 0
                     ,structured_failure_provider_parse INTEGER NOT NULL DEFAULT 0
+                    ,scan_telemetry_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
@@ -143,6 +144,7 @@ class RuntimeState:
                 "structured_failure_invalid_type": "INTEGER NOT NULL DEFAULT 0",
                 "structured_failure_truncated_json": "INTEGER NOT NULL DEFAULT 0",
                 "structured_failure_provider_parse": "INTEGER NOT NULL DEFAULT 0",
+                "scan_telemetry_json": "TEXT NOT NULL DEFAULT '{}'",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -175,6 +177,7 @@ class RuntimeState:
                     ,structured_failure_missing_field = ?, structured_failure_invalid_enum = ?
                     ,structured_failure_invalid_type = ?, structured_failure_truncated_json = ?
                     ,structured_failure_provider_parse = ?
+                    ,scan_telemetry_json = ?
                 WHERE cycle_id = ?
                 """,
                 (
@@ -199,6 +202,7 @@ class RuntimeState:
                     metrics.get("structured_failure_invalid_type", 0),
                     metrics.get("structured_failure_truncated_json", 0),
                     metrics.get("structured_failure_provider_parse", 0),
+                    json.dumps(metrics.get("scan_telemetry", {}), sort_keys=True),
                     cycle_id,
                 ),
             )

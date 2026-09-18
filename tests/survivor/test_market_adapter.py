@@ -146,3 +146,41 @@ def test_polymarket_adapter_paginates_bounded_universe_and_deduplicates(monkeypa
     assert len(markets) == 101
     assert [call[1]["offset"] for call in calls] == [0, 100]
     assert all(call[1]["limit"] <= module.PAGE_SIZE for call in calls)
+
+
+def test_polymarket_page_timeout_retries_once_and_fails_closed(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
+    from tradingagents.dataflows import polymarket as gamma
+
+    class TimedOut:
+        def __enter__(self):
+            raise gamma.GammaTotalTimeout("deadline")
+        def __exit__(self, *args):
+            return False
+
+    calls = []
+    monkeypatch.setattr(module.gamma, "request_deadline", lambda _: TimedOut())
+    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: calls.append(1))
+    adapter = module.PolymarketAdapter()
+
+    with pytest.raises(module.GammaPageError) as exc_info:
+        adapter.list_markets(limit=100)
+
+    assert exc_info.value.category == "GAMMA_TOTAL_TIMEOUT"
+    assert len(calls) == 0
+    telemetry = exc_info.value.telemetry
+    assert telemetry["pages_attempted"] == 1
+    assert telemetry["pages_completed"] == 0
+    assert telemetry["failure_page"] == 1
+    assert len(telemetry["pages"]) == 2  # primary attempt plus one retry
+
+
+def test_polymarket_invalid_json_is_typed_and_bounded(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
+
+    monkeypatch.setattr(module.gamma, "_request", lambda *args, **kwargs: {"not": "a list"})
+    adapter = module.PolymarketAdapter()
+    with pytest.raises(module.GammaPageError) as exc_info:
+        adapter.list_markets(limit=100)
+    assert exc_info.value.category == "GAMMA_INVALID_JSON"
+    assert len(exc_info.value.telemetry["pages"]) == 2

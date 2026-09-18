@@ -30,6 +30,7 @@ class ScanResult:
     # Raw/normalized observations retained for the optional read-only history
     # writer. This does not participate in ranking or execution decisions.
     observed: list[tuple[dict, object | None, ScanRejection | None]] = field(default_factory=list)
+    telemetry: dict = field(default_factory=dict)
 
 
 class MarketScanner:
@@ -58,6 +59,8 @@ class MarketScanner:
         current = now or datetime.now(timezone.utc)
         result = ScanResult()
         raw_markets = self.adapter.list_markets()
+        result.telemetry = dict(getattr(self.adapter, "last_scan_telemetry", {}))
+        result.telemetry.pop("_started_scan", None)
         result.discovered = len(raw_markets)
 
         candidates: list[Candidate] = []

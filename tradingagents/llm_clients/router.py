@@ -87,14 +87,26 @@ def _provider_response_from_wire(envelope):
     )
 
 
+def _apply_provider_specs(client, specs):
+    for kind, value, kwargs in specs or ():
+        if kind == "bind_tools":
+            client = client.bind_tools(value, **kwargs)
+        elif kind == "structured":
+            client = client.with_structured_output(value, **kwargs)
+    return client
+
+
 def _provider_call_worker(
     client, messages, result_queue, *, provider=None, model=None, llm_kwargs=None, llm_transform=None,
+    llm_specs=None,
 ) -> None:
     """Invoke one already-configured client and return only a bounded result."""
     try:
         if provider is not None:
             client = create_llm_client(provider=provider, model=model, **(llm_kwargs or {})).get_llm()
-            if llm_transform is not None:
+            if llm_specs:
+                client = _apply_provider_specs(client, llm_specs)
+            elif llm_transform is not None:
                 client = llm_transform(client)
         result_queue.send({"ok": True, "response": _provider_response_wire(client.invoke(messages))})
     except BaseException as exc:  # noqa: BLE001 - parent classifies safely
@@ -119,10 +131,10 @@ def _provider_call_deadline_seconds() -> float:
 
 def _invoke_with_deadline(
     client, messages, deadline: float, *, provider=None, model=None,
-    llm_kwargs=None, llm_transform=None,
+    llm_kwargs=None, llm_transform=None, llm_specs=None,
 ):
     """Run a provider call in a killable process with a hard total deadline."""
-    context = multiprocessing.get_context("fork")
+    context = multiprocessing.get_context("spawn" if provider is not None else "fork")
     parent_conn, child_conn = context.Pipe(duplex=False)
     process = context.Process(
         target=_provider_call_worker,
@@ -132,6 +144,7 @@ def _invoke_with_deadline(
             "model": model,
             "llm_kwargs": llm_kwargs,
             "llm_transform": llm_transform,
+            "llm_specs": llm_specs,
         },
         daemon=True,
     )
@@ -533,6 +546,7 @@ class ModelRouter:
         max_output_tokens: int,
         mock_client_factory: Any | None,
         llm_transform: Any | None,
+        llm_specs: tuple | None,
         llm_kwargs: dict[str, Any],
     ) -> Any:
         """Execute one full invocation lifecycle (reserve -> invoke -> settle).
@@ -563,7 +577,7 @@ class ModelRouter:
                 client = mock_client_factory(provider=provider, model=model, **llm_kwargs)
             else:
                 client = create_llm_client(provider=provider, model=model, **llm_kwargs).get_llm()
-            if llm_transform is not None:
+            if mock_client_factory and llm_transform is not None:
                 client = llm_transform(client)
             # Test doubles are deliberately invoked in-process so existing
             # unit seams remain deterministic. Real provider clients always
@@ -578,7 +592,8 @@ class ModelRouter:
                     provider=provider,
                     model=model,
                     llm_kwargs=llm_kwargs,
-                    llm_transform=llm_transform,
+                    llm_transform=llm_transform if mock_client_factory else None,
+                    llm_specs=llm_specs,
                 )
             )
             latency_ms = int((time.time() - start_time) * 1000)
@@ -659,6 +674,7 @@ class ModelRouter:
         est_input_tokens: int = 1500,
         mock_client_factory: Any | None = None,
         llm_transform: Any | None = None,
+        llm_specs: tuple | None = None,
         purpose: str = "standard",
         **llm_kwargs,
     ) -> Any:
@@ -718,6 +734,7 @@ class ModelRouter:
                     clamped_output,
                     mock_client_factory,
                     llm_transform,
+                    llm_specs,
                     llm_kwargs,
                 )
                 if purpose == "structured_output":

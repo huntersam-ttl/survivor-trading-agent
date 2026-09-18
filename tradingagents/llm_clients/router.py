@@ -87,9 +87,15 @@ def _provider_response_from_wire(envelope):
     )
 
 
-def _provider_call_worker(client, messages, result_queue) -> None:
+def _provider_call_worker(
+    client, messages, result_queue, *, provider=None, model=None, llm_kwargs=None, llm_transform=None,
+) -> None:
     """Invoke one already-configured client and return only a bounded result."""
     try:
+        if provider is not None:
+            client = create_llm_client(provider=provider, model=model, **(llm_kwargs or {})).get_llm()
+            if llm_transform is not None:
+                client = llm_transform(client)
         result_queue.send({"ok": True, "response": _provider_response_wire(client.invoke(messages))})
     except BaseException as exc:  # noqa: BLE001 - parent classifies safely
         try:
@@ -111,12 +117,23 @@ def _provider_call_deadline_seconds() -> float:
         return 75.0
 
 
-def _invoke_with_deadline(client, messages, deadline: float):
+def _invoke_with_deadline(
+    client, messages, deadline: float, *, provider=None, model=None,
+    llm_kwargs=None, llm_transform=None,
+):
     """Run a provider call in a killable process with a hard total deadline."""
     context = multiprocessing.get_context("fork")
     parent_conn, child_conn = context.Pipe(duplex=False)
     process = context.Process(
-        target=_provider_call_worker, args=(client, messages, child_conn), daemon=True,
+        target=_provider_call_worker,
+        args=(client, messages, child_conn),
+        kwargs={
+            "provider": provider,
+            "model": model,
+            "llm_kwargs": llm_kwargs,
+            "llm_transform": llm_transform,
+        },
+        daemon=True,
     )
     deadline_at = time.monotonic() + deadline
     result = None
@@ -139,7 +156,11 @@ def _invoke_with_deadline(client, messages, deadline: float):
     if result is None and parent_conn.poll(0.1):
         result = parent_conn.recv()
     if result is None:
-        result = {"ok": False, "error_type": "ProviderWorkerError", "message": "worker returned no result"}
+        result = {
+            "ok": False,
+            "error_type": "ProviderWorkerError",
+            "message": f"worker returned no result (exitcode={process.exitcode})",
+        }
     parent_conn.close()
     child_conn.close()
     process.close()
@@ -550,7 +571,15 @@ class ModelRouter:
             response = (
                 client.invoke(messages)
                 if mock_client_factory
-                else _invoke_with_deadline(client, messages, _provider_call_deadline_seconds())
+                else _invoke_with_deadline(
+                    None,
+                    messages,
+                    _provider_call_deadline_seconds(),
+                    provider=provider,
+                    model=model,
+                    llm_kwargs=llm_kwargs,
+                    llm_transform=llm_transform,
+                )
             )
             latency_ms = int((time.time() - start_time) * 1000)
 

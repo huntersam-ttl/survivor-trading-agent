@@ -20,7 +20,6 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
-import queue
 import time
 from typing import Any
 
@@ -91,13 +90,18 @@ def _provider_response_from_wire(envelope):
 def _provider_call_worker(client, messages, result_queue) -> None:
     """Invoke one already-configured client and return only a bounded result."""
     try:
-        result_queue.put({"ok": True, "response": _provider_response_wire(client.invoke(messages))})
+        result_queue.send({"ok": True, "response": _provider_response_wire(client.invoke(messages))})
     except BaseException as exc:  # noqa: BLE001 - parent classifies safely
-        result_queue.put({
-            "ok": False,
-            "error_type": type(exc).__name__,
-            "message": str(exc)[:500],
-        })
+        try:
+            result_queue.send({
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "message": str(exc)[:500],
+            })
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        result_queue.close()
 
 
 def _provider_call_deadline_seconds() -> float:
@@ -110,19 +114,18 @@ def _provider_call_deadline_seconds() -> float:
 def _invoke_with_deadline(client, messages, deadline: float):
     """Run a provider call in a killable process with a hard total deadline."""
     context = multiprocessing.get_context("fork")
-    result_queue = context.Queue(maxsize=1)
+    parent_conn, child_conn = context.Pipe(duplex=False)
     process = context.Process(
-        target=_provider_call_worker, args=(client, messages, result_queue), daemon=True,
+        target=_provider_call_worker, args=(client, messages, child_conn), daemon=True,
     )
     deadline_at = time.monotonic() + deadline
     result = None
     process.start()
     while result is None and time.monotonic() < deadline_at:
-        try:
-            result = result_queue.get(timeout=min(0.1, max(0.001, deadline_at - time.monotonic())))
-        except queue.Empty:
-            if not process.is_alive():
-                break
+        if parent_conn.poll(min(0.1, max(0.001, deadline_at - time.monotonic()))):
+            result = parent_conn.recv()
+        elif not process.is_alive():
+            break
     if result is not None:
         process.join(max(0.0, deadline_at - time.monotonic()))
     if process.is_alive():
@@ -133,16 +136,12 @@ def _invoke_with_deadline(client, messages, deadline: float):
             process.join(2.0)
         if result is None:
             raise ProviderCallTimeout(f"provider call exceeded {deadline:.1f}s total deadline")
+    if result is None and parent_conn.poll(0.1):
+        result = parent_conn.recv()
     if result is None:
-        try:
-            # A Queue feeder can flush a completed worker's small envelope just
-            # after the child exits. Give that local transport a bounded drain
-            # window; this is not additional provider-call time.
-            result = result_queue.get(timeout=0.5)
-        except queue.Empty:
-            result = {"ok": False, "error_type": "ProviderWorkerError", "message": "worker returned no result"}
-    result_queue.close()
-    result_queue.join_thread()
+        result = {"ok": False, "error_type": "ProviderWorkerError", "message": "worker returned no result"}
+    parent_conn.close()
+    child_conn.close()
     process.close()
     if result.get("ok"):
         return _provider_response_from_wire(result["response"])

@@ -71,7 +71,7 @@ def preflight_check(
     # 1-3. paper-only policy / live trading / broker absence (structural)
     from tradingagents.survivor.policy import SurvivorPolicy
 
-    policy = SurvivorPolicy()
+    policy = SurvivorPolicy.from_env()
     record("policy_paper_only", policy.real_trading_enabled is False and policy.mode.value == "PAPER_ONLY")
     record("live_trading_absent", True, "no code path exists")
     record("broker_absent", True, "no broker backend configured")
@@ -101,7 +101,12 @@ def preflight_check(
         record("market_adapter_readonly", True, "no adapter instance (validated at cycle start)")
     # 10. AI budgets valid
     record("ai_budgets_valid", policy.global_daily_pence > 0 and policy.global_monthly_pence > 0)
-    # 11. FX present
+    # 11. Configured budget values are part of operational health truth.
+    record("global_daily_budget_pence", True, str(policy.global_daily_pence))
+    record("global_monthly_budget_pence", True, str(policy.global_monthly_pence))
+    record("openrouter_daily_budget_pence", True, str(policy.get_provider_daily_budget("openrouter")))
+    record("openrouter_monthly_budget_pence", True, str(policy.get_provider_monthly_budget("openrouter")))
+    # 12. FX present
     record("fx_present", policy.usd_gbp_rate is not None and policy.usd_gbp_rate > 0)
     # 12. disk space
     free = shutil.disk_usage(base if os.path.isdir(base) else os.path.expanduser("~")).free

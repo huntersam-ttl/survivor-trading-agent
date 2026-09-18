@@ -53,6 +53,24 @@ def _ledger(db_path) -> InferenceUsageLedger:
     return InferenceUsageLedger(db_path=str(db_path))
 
 
+@pytest.mark.unit
+def test_health_uses_configured_runtime_budget_policy(tmp_path, monkeypatch):
+    monkeypatch.setenv("SURVIVOR_GLOBAL_DAILY_GBP", "5.00")
+    monkeypatch.setenv("SURVIVOR_GLOBAL_MONTHLY_GBP", "100.00")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
+
+    report = preflight_check(
+        survivor_dir=str(tmp_path),
+        paper_ledger_path=str(tmp_path / "paper.db"),
+        require_halt_clear=False,
+    )
+
+    assert report.checks["global_daily_budget_pence"] == "500"
+    assert report.checks["global_monthly_budget_pence"] == "10000"
+    assert report.checks["openrouter_daily_budget_pence"] == "500"
+    assert report.checks["openrouter_monthly_budget_pence"] == "10000"
+
+
 def _record(ledger, pence: int, provider="openai", model="gpt-test", role="trader"):
     ledger.record_inference(
         run_id="run_ops",

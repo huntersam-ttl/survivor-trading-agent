@@ -25,6 +25,8 @@ from tradingagents.survivor.markets.types import (
 
 PROVIDER = "polymarket"
 MARKET_TYPE = "prediction_binary"
+PAGE_SIZE = 100
+DEFAULT_UNIVERSE_LIMIT = 1000
 
 
 def _iso_to_iso(value: str | None) -> str | None:
@@ -42,22 +44,45 @@ class PolymarketAdapter(MarketAdapter):
     provider = PROVIDER
     market_type = MARKET_TYPE
 
-    def list_markets(self, limit: int = 100) -> list[dict]:
+    def list_markets(self, limit: int = DEFAULT_UNIVERSE_LIMIT) -> list[dict]:
         """Fetch open binary markets from the public Gamma ``/markets`` collection
-        (keyless, read-only), ordered by traded volume."""
-        data = gamma._request(
-            "markets",
-            {
-                "limit": min(limit, 100),
-                "closed": "false",
-                "order": "volumeNum",
-                "ascending": "false",
-            },
-        )
+        (keyless, read-only), ordered by traded volume.
+
+        Gamma caps one page at 100 rows. Keep the universe bounded, but walk
+        the provider's offset pages so the scanner is not permanently limited
+        to the first volume-ranked page.
+        """
+        target = max(0, min(int(limit), DEFAULT_UNIVERSE_LIMIT))
+        if target == 0:
+            return []
+        markets: list[dict] = []
+        seen: set[str] = set()
+        for offset in range(0, target, PAGE_SIZE):
+            data = gamma._request(
+                "markets",
+                {
+                    "limit": min(PAGE_SIZE, target - offset),
+                    "offset": offset,
+                    "closed": "false",
+                    "order": "volumeNum",
+                    "ascending": "false",
+                },
+            )
+            if not isinstance(data, list):
+                break
+            for market in data:
+                market_id = str(market.get("id") or "")
+                if market_id and market_id in seen:
+                    continue
+                if market_id:
+                    seen.add(market_id)
+                markets.append(market)
+            if len(data) < PAGE_SIZE:
+                break
         now = datetime.now(timezone.utc)
-        markets = [m for m in data if gamma._is_forward_looking(m, now)]
-        markets.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
-        return markets[:limit]
+        forward = [m for m in markets if gamma._is_forward_looking(m, now)]
+        forward.sort(key=lambda m: m.get("volumeNum") or 0, reverse=True)
+        return forward[:target]
 
     @staticmethod
     def normalize(raw: dict, now: datetime | None = None) -> MarketSnapshot | None:

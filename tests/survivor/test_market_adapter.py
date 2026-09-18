@@ -112,3 +112,37 @@ def test_polymarket_adapter_exists_and_is_read_only():
     assert adapter.provider == "polymarket"
     for forbidden in FORBIDDEN_METHODS:
         assert not hasattr(adapter, forbidden)
+
+
+@pytest.mark.unit
+def test_polymarket_adapter_paginates_bounded_universe_and_deduplicates(monkeypatch):
+    from tradingagents.survivor.markets import polymarket_adapter as module
+
+    first_page = [
+        {"id": f"page-0-{i}", "closed": False, "endDate": "2099-01-01T00:00:00Z"}
+        for i in range(99)
+    ]
+    first_page.insert(0, {"id": "a", "closed": False, "endDate": "2099-01-01T00:00:00Z"})
+    pages = {
+        0: first_page,
+        100: [
+            {"id": "a", "closed": False, "endDate": "2099-01-01T00:00:00Z"},
+            {"id": "b", "closed": False, "endDate": "2099-01-01T00:00:00Z"},
+        ],
+    }
+    calls = []
+
+    def request(path, params):
+        calls.append((path, params.copy()))
+        return pages.get(params["offset"], [])
+
+    monkeypatch.setattr(module.gamma, "_request", request)
+    monkeypatch.setattr(module.gamma, "_is_forward_looking", lambda market, now: True)
+
+    markets = module.PolymarketAdapter().list_markets(limit=150)
+
+    assert markets[0]["id"] == "a"
+    assert "b" in [m["id"] for m in markets]
+    assert len(markets) == 101
+    assert [call[1]["offset"] for call in calls] == [0, 100]
+    assert all(call[1]["limit"] <= module.PAGE_SIZE for call in calls)

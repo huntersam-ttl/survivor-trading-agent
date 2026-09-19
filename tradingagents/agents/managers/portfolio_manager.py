@@ -29,7 +29,7 @@ from tradingagents.agents.utils.structured import (
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
     structured_prediction_llm = bind_structured(
-        llm, PredictionMarketDecision, "Portfolio Manager (prediction market)"
+        llm, PredictionMarketDecision, "Portfolio Manager (prediction market)", include_raw=True
     )
 
     def portfolio_manager_node(state) -> dict:

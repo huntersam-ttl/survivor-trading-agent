@@ -160,6 +160,14 @@ def _extract_json_object(text: str) -> dict | None:
 def _normalise_structured_payload(value: Any) -> Any:
     """Normalise harmless provider wrappers while leaving semantics to Pydantic."""
     if isinstance(value, dict):
+        # LangChain's include_raw envelope preserves the provider message when
+        # its structured parser returns ``None``. Prefer the validated parsed
+        # value; otherwise inspect only the raw message content below.
+        if "parsed" in value and (value.get("parsed") is not None or "raw" in value):
+            parsed = value.get("parsed")
+            if parsed is not None:
+                return _normalise_structured_payload(parsed)
+            return _normalise_structured_payload(value.get("raw"))
         if len(value) == 1:
             key, nested = next(iter(value.items()))
             if key in _JSON_WRAPPERS:
@@ -201,14 +209,17 @@ def _repair_instruction(repair_prompt: Any, schema: type[BaseModel], previous: A
     )
 
 
-def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
+def bind_structured(
+    llm: Any, schema: type[T], agent_name: str, *, include_raw: bool = False
+) -> Any | None:
     """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
 
     Logs a warning when the binding fails so the user understands the agent
     will use free-text generation for every call instead of one-shot fallback.
     """
     try:
-        return llm.with_structured_output(schema)
+        kwargs = {"include_raw": True} if include_raw else {}
+        return llm.with_structured_output(schema, **kwargs)
     except (NotImplementedError, AttributeError) as exc:
         logger.warning(
             "%s: provider does not support with_structured_output (%s); "

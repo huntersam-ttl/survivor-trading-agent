@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from tests.survivor.market_helpers import make_snapshot
@@ -188,6 +189,20 @@ def test_common_tool_envelope_and_prose_are_extracted_without_inventing_fields()
     )
     assert "**Rating**: Hold" in rendered
     assert "**Key Evidence**:" in rendered
+
+
+def test_include_raw_envelope_recovers_json_from_unparsed_provider_message():
+    structured = MagicMock()
+    structured.invoke.return_value = {
+        "raw": AIMessage(content=_decision().model_dump_json()),
+        "parsed": None,
+        "parsing_error": ValueError("no tool call"),
+    }
+    rendered = invoke_structured_or_freetext(
+        structured, MagicMock(), "prompt", render_pm_decision, "PM",
+        schema=PredictionMarketDecision,
+    )
+    assert "**Confidence**: 0.7" in rendered
 
 
 def test_failure_diagnostics_are_bounded_and_field_specific():

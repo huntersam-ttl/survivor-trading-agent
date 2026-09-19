@@ -72,6 +72,7 @@ def test_completed_cycle_persists_distinct_finish_timestamp(tmp_path, monkeypatc
     row = state.last_cycle()
     assert report.reason == "NO_PROPOSAL"
     assert row["finished_utc"] > row["started_utc"]
+    assert row["status"] == "COMPLETED"
 
 
 def test_provider_timeout_finishes_cycle_without_downstream_work(tmp_path, monkeypatch):

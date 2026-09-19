@@ -9,7 +9,13 @@ import pytest
 
 from tradingagents.llm_clients.budget import BudgetManager
 from tradingagents.llm_clients.provider_health import ProviderHealthManager
-from tradingagents.llm_clients.router import ModelRouter, _invoke_with_deadline
+from tradingagents.llm_clients.router import (
+    ModelRouter,
+    _invoke_with_deadline,
+    _provider_response_from_wire,
+    _provider_response_wire,
+    _serializable_provider_specs,
+)
 from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
 from tradingagents.survivor.policy import SurvivorPolicy
 from tradingagents.survivor.types import (
@@ -79,6 +85,48 @@ def test_provider_timeout_settles_budget_reservation(test_router, monkeypatch):
     with pytest.raises(Exception, match="provider call exceeded"):
         router.invoke_role("timeout_role", "hello")
     assert router.budget_manager.get_pending_reserved_pence() == 0
+
+
+@pytest.mark.unit
+def test_tool_specs_are_spawn_safe_and_keep_callable_out_of_args():
+    from tradingagents.agents.utils.news_data_tools import get_global_news
+
+    specs = _serializable_provider_specs((("bind_tools", [get_global_news], {}),))
+    assert specs[0][0] == "bind_tools"
+    assert specs[0][1][0]["function"]["name"] == "get_global_news"
+    assert "callable" not in repr(specs[0][1][0]).lower()
+    # A JSON round-trip proves the child receives data, not a tool object.
+    import json
+
+    json.loads(json.dumps(specs[0][1]))
+
+
+@pytest.mark.unit
+def test_provider_tool_call_round_trips_to_parent():
+    from langchain_core.messages import AIMessage
+
+    response = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "get_global_news", "args": {"curr_date": "2026-09-19"}, "id": "call-1"}
+        ],
+    )
+    restored = _provider_response_from_wire(_provider_response_wire(response))
+    assert restored.tool_calls[0]["name"] == "get_global_news"
+    assert restored.tool_calls[0]["args"]["curr_date"] == "2026-09-19"
+
+
+@pytest.mark.unit
+def test_parent_executes_get_global_news_callable():
+    from unittest.mock import patch
+
+    from tradingagents.agents.utils.news_data_tools import get_global_news
+
+    with patch(
+        "tradingagents.agents.utils.news_data_tools.route_to_vendor",
+        return_value="parent-result",
+    ):
+        assert get_global_news.invoke({"curr_date": "2026-09-19", "limit": 1}) == "parent-result"
 
 
 @pytest.fixture

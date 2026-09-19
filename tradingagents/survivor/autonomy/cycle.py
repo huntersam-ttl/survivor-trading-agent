@@ -626,8 +626,14 @@ def run_survivor_cycle(
         "duration_sec": report.duration_sec,
         "scan_telemetry": report.details.get("scan", {}),
     }
+    # ``ACTIVE``/``DRY_RUN`` describe the operational mode of a successful
+    # cycle, but are not terminal persistence states. Keep the heartbeat's
+    # operational status unchanged while marking the durable cycle complete.
+    persisted_status = (
+        "COMPLETED" if report.status in ("ACTIVE", "DRY_RUN") else report.status
+    )
     state.finish_cycle(
-        cycle_id, report.status, report.reason, metrics,
+        cycle_id, persisted_status, report.reason, metrics,
         now=datetime.now(timezone.utc),
     )
     return report

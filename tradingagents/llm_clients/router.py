@@ -17,11 +17,14 @@ configured model pools remain eligible for dynamic rotation.
 
 from __future__ import annotations
 
+import json
 import logging
 import multiprocessing
 import os
 import time
 from typing import Any
+
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.budget import BudgetManager
@@ -66,6 +69,8 @@ def _provider_response_wire(response):
             "kind": "message",
             "content": _wire_value(response.content),
             "additional_kwargs": _wire_value(getattr(response, "additional_kwargs", {})),
+            "tool_calls": _wire_value(getattr(response, "tool_calls", [])),
+            "invalid_tool_calls": _wire_value(getattr(response, "invalid_tool_calls", [])),
             "response_metadata": _wire_value(getattr(response, "response_metadata", {})),
             "usage_metadata": _wire_value(getattr(response, "usage_metadata", {})),
         }
@@ -82,6 +87,8 @@ def _provider_response_from_wire(envelope):
     return AIMessage(
         content=envelope.get("content"),
         additional_kwargs=envelope.get("additional_kwargs") or {},
+        tool_calls=envelope.get("tool_calls") or [],
+        invalid_tool_calls=envelope.get("invalid_tool_calls") or [],
         response_metadata=envelope.get("response_metadata") or {},
         usage_metadata=envelope.get("usage_metadata") or None,
     )
@@ -94,6 +101,38 @@ def _apply_provider_specs(client, specs):
         elif kind == "structured":
             client = client.with_structured_output(value, **kwargs)
     return client
+
+
+def _serializable_tool_schema(tool: Any) -> dict[str, Any]:
+    """Convert a LangChain tool to a plain provider tool schema.
+
+    Provider workers are spawned processes. They must never receive the
+    callable-backed ``StructuredTool`` object itself; only the JSON tool
+    contract is needed to bind the provider client. The callable remains in
+    the parent graph's ToolNode for execution after a tool call returns.
+    """
+    if isinstance(tool, dict):
+        schema = tool
+    else:
+        schema = convert_to_openai_tool(tool)
+    # Validate the boundary explicitly so a future adapter cannot silently
+    # reintroduce a non-serializable object into multiprocessing args.
+    json.dumps(schema)
+    return schema
+
+
+def _serializable_provider_specs(specs: tuple | None) -> tuple | None:
+    """Return provider specs containing only spawn-safe values."""
+    if not specs:
+        return specs
+    safe_specs = []
+    for kind, value, kwargs in specs:
+        if kind == "bind_tools":
+            tools = value if isinstance(value, (list, tuple)) else [value]
+            safe_specs.append((kind, [_serializable_tool_schema(tool) for tool in tools], kwargs))
+        else:
+            safe_specs.append((kind, value, kwargs))
+    return tuple(safe_specs)
 
 
 def _provider_call_worker(
@@ -134,6 +173,7 @@ def _invoke_with_deadline(
     llm_kwargs=None, llm_transform=None, llm_specs=None,
 ):
     """Run a provider call in a killable process with a hard total deadline."""
+    llm_specs = _serializable_provider_specs(llm_specs)
     context = multiprocessing.get_context("spawn" if provider is not None else "fork")
     parent_conn, child_conn = context.Pipe(duplex=False)
     process = context.Process(

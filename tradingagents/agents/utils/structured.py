@@ -18,11 +18,11 @@ all three agents log the same warnings when fallback fires.
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import re
-from contextvars import ContextVar
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
@@ -41,7 +41,12 @@ NO_EXTERNAL_TOOLS = (
     "or search the web; if something is missing, say so explicitly."
 )
 
-_JSON_WRAPPERS = frozenset({"data", "output", "response", "result", "structured_output"})
+_JSON_WRAPPERS = frozenset({
+    "data", "output", "response", "result", "structured_output",
+    # Common OpenAI-compatible tool-call envelopes.  These wrappers carry the
+    # model's object; they do not add or infer any decision data.
+    "args", "arguments", "tool_input",
+})
 
 _telemetry: ContextVar[dict[str, int] | None] = ContextVar("structured_telemetry", default=None)
 
@@ -60,6 +65,40 @@ def _record_telemetry(name: str) -> None:
     values = _telemetry.get()
     if values is not None:
         values[name] = int(values.get(name, 0)) + 1
+
+
+def _record_failure_details(error: Exception) -> None:
+    """Persist bounded field-level details without model prompts or output."""
+    fields: list[str] = []
+    safe_message = type(error).__name__
+    try:
+        errors = error.errors() if hasattr(error, "errors") else []
+        fields = sorted({
+            ".".join(str(part) for part in item.get("loc", ()))
+            for item in errors
+            if item.get("loc")
+        })[:12]
+        if errors:
+            safe_message = "; ".join(
+                f"{'.'.join(str(part) for part in item.get('loc', ())) or '<root>'}: "
+                f"{str(item.get('msg', 'validation error'))[:180]}"
+                for item in errors[:12]
+            )[:500]
+        else:
+            safe_message = str(error)[:500]
+    except Exception:  # diagnostics must never affect fail-closed behavior
+        pass
+    values = _telemetry.get()
+    if values is not None:
+        # Persist only bounded structural metadata.  Never persist prompts or
+        # model output: this is for diagnosing recurring schema drift safely.
+        diagnostics = values.setdefault("structured_failure_diagnostics", [])
+        if isinstance(diagnostics, list) and len(diagnostics) < 12:
+            diagnostics.append({
+                "error_type": type(error).__name__,
+                "fields": fields,
+                "message": safe_message,
+            })
 
 
 def _record_failure_category(error: Exception) -> None:
@@ -82,6 +121,7 @@ def _record_failure_category(error: Exception) -> None:
     except Exception:  # diagnostics must never affect fail-closed behavior
         pass
     _record_telemetry(category)
+    _record_failure_details(error)
 
 
 def _response_content(value: Any) -> str | None:
@@ -123,6 +163,16 @@ def _normalise_structured_payload(value: Any) -> Any:
         if len(value) == 1:
             key, nested = next(iter(value.items()))
             if key in _JSON_WRAPPERS:
+                return _normalise_structured_payload(nested)
+        # Some OpenAI-compatible adapters return a tool-call object as
+        # {"type": "tool_call", "args": {...}}.  Only unwrap when args is a
+        # mapping; strings/lists are left to schema validation.
+        for key in ("args", "arguments", "tool_input"):
+            nested = value.get(key)
+            if isinstance(nested, dict) and (
+                value.get("type") in {"tool_call", "function"}
+                or len(value) <= 3
+            ):
                 return _normalise_structured_payload(nested)
         return value
     text = _response_content(value)
@@ -203,6 +253,7 @@ def invoke_structured_or_freetext(
                 on_structured_result(result)
             return render(result)
         except Exception as exc:
+            _record_failure_details(exc)
             if repair_prompt is not None:
                 repair_instruction = repair_prompt
                 if schema is not None and hasattr(exc, "errors"):
@@ -233,7 +284,9 @@ def invoke_structured_or_freetext(
                     if on_structured_result is not None:
                         on_structured_result(repaired)
                     return render(repaired)
-                except Exception as repair_exc:
+                except Exception as structured_repair_error:
+                    _record_failure_details(structured_repair_error)
+                    repair_error = structured_repair_error
                     # Some providers return useful JSON as ordinary content even
                     # when their structured binding yields no parsed object. A
                     # single bounded text repair preserves fail-closed validation
@@ -248,14 +301,14 @@ def invoke_structured_or_freetext(
                             if on_structured_result is not None:
                                 on_structured_result(repaired)
                             return render(repaired)
-                        except Exception as text_repair_exc:
-                            repair_exc = text_repair_exc
+                        except Exception as text_repair_error:
+                            repair_error = text_repair_error
                     if fail_on_structured_error:
-                        _record_failure_category(repair_exc)
+                        _record_failure_category(repair_error)
                         _record_telemetry("structured_final_failure")
                         raise ValueError(
                             f"{agent_name}: structured output and one repair were invalid"
-                        ) from repair_exc
+                        ) from repair_error
             logger.warning(
                 "%s: structured-output invocation failed (%s); retrying once as free text",
                 agent_name, exc,

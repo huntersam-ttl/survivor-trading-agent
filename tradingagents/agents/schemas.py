@@ -36,6 +36,16 @@ def _coerce_optional_float(value):
     return value
 
 
+def _coerce_portfolio_rating(value):
+    """Accept casing/spacing variants of the declared rating enum only."""
+    if isinstance(value, str):
+        compact = " ".join(value.replace("_", " ").replace("-", " ").split()).casefold()
+        for rating in PortfolioRating:
+            if compact == rating.value.casefold():
+                return rating
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Shared rating types
 # ---------------------------------------------------------------------------
@@ -102,6 +112,11 @@ class ResearchPlan(BaseModel):
             "including position sizing guidance consistent with the rating."
         ),
     )
+
+    @field_validator("recommendation", mode="before")
+    @classmethod
+    def _normalise_rating(cls, value):
+        return _coerce_portfolio_rating(value)
 
 
 def render_research_plan(plan: ResearchPlan) -> str:
@@ -231,6 +246,11 @@ class PortfolioDecision(BaseModel):
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
 
+    @field_validator("rating", mode="before")
+    @classmethod
+    def _normalise_rating(cls, value):
+        return _coerce_portfolio_rating(value)
+
     @field_validator("investment_thesis")
     @classmethod
     def _thesis_required(cls, value: str) -> str:
@@ -281,7 +301,7 @@ class PredictionMarketDecision(PortfolioDecision):
             "no trade", "notrade"
         }:
             return PortfolioRating.HOLD
-        return value
+        return _coerce_portfolio_rating(value)
 
     @model_validator(mode="after")
     def _require_semantics_for_every_decision(self):

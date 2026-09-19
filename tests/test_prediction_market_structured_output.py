@@ -161,6 +161,64 @@ def test_text_repair_still_fails_closed_on_missing_semantics():
         )
 
 
+@pytest.mark.parametrize("rating", ["BUY", "OVERWEIGHT", "HOLD", "UNDERWEIGHT", "SELL"])
+def test_declared_rating_casing_is_normalized_without_changing_semantics(rating):
+    decision = {
+        "rating": rating,
+        "executive_summary": "The evidence supports a bounded decision.",
+        "investment_thesis": "The decision is grounded in the supplied evidence.",
+        "confidence": 0.6,
+        "key_evidence": ["One observed fact."],
+        "key_risks": ["One unresolved risk."],
+        "probability_yes": None if rating == "HOLD" else 0.6,
+    }
+    parsed = PredictionMarketDecision.model_validate(decision)
+    assert parsed.rating.value == rating.title()
+
+
+def test_common_tool_envelope_and_prose_are_extracted_without_inventing_fields():
+    structured = MagicMock()
+    structured.invoke.return_value = {
+        "type": "tool_call",
+        "args": {"output": _decision().model_dump()},
+    }
+    rendered = invoke_structured_or_freetext(
+        structured, MagicMock(), "prompt", render_pm_decision, "PM",
+        schema=PredictionMarketDecision,
+    )
+    assert "**Rating**: Hold" in rendered
+    assert "**Key Evidence**:" in rendered
+
+
+def test_failure_diagnostics_are_bounded_and_field_specific():
+    structured = MagicMock()
+    structured.invoke.side_effect = [
+        {"rating": "Hold", "confidence": "high"},
+        {"rating": "Hold", "confidence": "high"},
+    ]
+    telemetry = {"structured_failure_diagnostics": []}
+    from tradingagents.agents.utils.structured import (
+        reset_structured_telemetry,
+        structured_telemetry_scope,
+    )
+    token = structured_telemetry_scope(telemetry)
+    try:
+        with pytest.raises(ValueError, match="structured output and one repair"):
+            invoke_structured_or_freetext(
+                structured, MagicMock(), "prompt", render_pm_decision, "PM",
+                schema=PredictionMarketDecision, repair_prompt="repair",
+                fail_on_structured_error=True,
+            )
+    finally:
+        reset_structured_telemetry(token)
+    assert telemetry["structured_failure_diagnostics"]
+    assert any(
+        "confidence" in item["fields"]
+        for item in telemetry["structured_failure_diagnostics"]
+    )
+    assert all(len(item["message"]) <= 500 for item in telemetry["structured_failure_diagnostics"])
+
+
 def test_default_research_accepts_typed_probability(monkeypatch):
     from tradingagents.graph import trading_graph as tg_mod
     from tradingagents.survivor.autonomy.cycle import _default_research

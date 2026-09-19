@@ -10,6 +10,7 @@ System-level corruption (ledger/accounting) halts the entire runtime.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -70,7 +71,7 @@ class ResearchResult:
     run_id: str | None = None
     status: str = "OK"          # OK | FAILED
     reason: str | None = None
-    structured_telemetry: dict[str, int] = field(default_factory=dict)
+    structured_telemetry: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -310,7 +311,7 @@ def _research_failure(
     reason: str,
     run_id: str | None,
     ai_cost_pence: int = 0,
-    structured_telemetry: dict[str, int] | None = None,
+    structured_telemetry: dict[str, Any] | None = None,
 ) -> ResearchResult:
     return ResearchResult(
         status="FAILED", reason=reason[:200], run_id=run_id, ai_cost_pence=ai_cost_pence,
@@ -827,10 +828,25 @@ def _run_cycle_body(
                 report.ai_cost_pence += result.ai_cost_pence
                 if (result.reason or "").startswith("AI_BUDGET_UNAVAILABLE"):
                     report.budget_blocked_count += 1
+                failure_reason = result.reason or "RESEARCH_FAILED"
+                diagnostics = result.structured_telemetry.get("structured_failure_diagnostics", [])
+                if diagnostics:
+                    # Keep persisted diagnostics structural and bounded; never
+                    # include prompts or provider output in runtime evidence.
+                    safe = [
+                        {
+                            "error_type": str(item.get("error_type", ""))[:80],
+                            "fields": [str(field)[:120] for field in item.get("fields", [])[:12]],
+                            "message": str(item.get("message", ""))[:500],
+                        }
+                        for item in diagnostics[:4]
+                        if isinstance(item, dict)
+                    ]
+                    failure_reason = f"{failure_reason} | structured_diagnostics={json.dumps(safe, sort_keys=True)}"
                 report.candidate_failures.append(
-                    {"market_id": snapshot.market_id, "reason": result.reason or "RESEARCH_FAILED"}
+                    {"market_id": snapshot.market_id, "reason": failure_reason}
                 )
-                state.record_research(cycle_id, snapshot.market_id, run_id, "FAILED", result.reason)
+                state.record_research(cycle_id, snapshot.market_id, run_id, "FAILED", failure_reason)
                 continue
 
             if _is_no_trade_decision(result.decision_text) and (

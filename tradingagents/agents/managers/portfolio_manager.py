@@ -71,7 +71,7 @@ def create_portfolio_manager(llm):
 
 Ground every conclusion in specific evidence from the analysts. Commit to a directional call only when the evidence clearly supports one; choose Hold when the case is balanced, materially conflicting, ambiguous, or insufficient to justify changing exposure, rather than forcing a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
 
-STRUCTURED OUTPUT CONTRACT: Return a complete object. Never omit investment_thesis; it must be a non-empty explanation grounded in this prompt. For a binary prediction market, return confidence plus non-empty key_evidence and key_risks for every rating. Return probability_yes for an actionable rating; for Hold/NO_TRADE it may be null because no entry probability is being asserted. Do not place these fields only in prose.
+STRUCTURED OUTPUT CONTRACT: Return a complete object. Never omit investment_thesis; it must be a non-empty explanation grounded in this prompt. For a binary prediction market, return confidence as a JSON number from 0.0 to 1.0 plus non-empty key_evidence and key_risks JSON arrays for every rating. Return probability_yes as a JSON number from 0.0 to 1.0 for an actionable rating; for Hold/NO_TRADE it may be null because no entry probability is being asserted. Do not place these fields only in prose.
 
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 
@@ -89,7 +89,10 @@ STRUCTURED OUTPUT CONTRACT: Return a complete object. Never omit investment_thes
             schema=selected_schema,
             repair_prompt=(
                 f"{prompt}\n\nREPAIR REQUIRED: Return a complete valid structured object now. "
-                "Use only evidence in the prompt; do not omit or invent required fields."
+                "Use only evidence in the prompt; do not omit or invent required fields. "
+                "For prediction markets, confidence and actionable probability_yes must "
+                "be JSON numbers in the declared 0.0-1.0 range; key_evidence and "
+                "key_risks must be non-empty JSON arrays of strings."
                 if is_prediction_market else None
             ),
             fail_on_structured_error=is_prediction_market,

@@ -159,6 +159,22 @@ def _extract_json_object(text: str) -> dict | None:
 
 def _normalise_structured_payload(value: Any) -> Any:
     """Normalise harmless provider wrappers while leaving semantics to Pydantic."""
+    tool_calls = getattr(value, "tool_calls", None)
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, dict) and isinstance(call.get("args"), dict):
+                return _normalise_structured_payload(call["args"])
+    additional = getattr(value, "additional_kwargs", None)
+    if isinstance(additional, dict):
+        function_call = additional.get("function_call")
+        if isinstance(function_call, dict):
+            arguments = function_call.get("arguments")
+            if isinstance(arguments, dict):
+                return _normalise_structured_payload(arguments)
+            if isinstance(arguments, str):
+                extracted = _extract_json_object(arguments)
+                if extracted is not None:
+                    return _normalise_structured_payload(extracted)
     if isinstance(value, dict):
         # LangChain's include_raw envelope preserves the provider message when
         # its structured parser returns ``None``. Prefer the validated parsed
@@ -168,6 +184,11 @@ def _normalise_structured_payload(value: Any) -> Any:
             if parsed is not None:
                 return _normalise_structured_payload(parsed)
             return _normalise_structured_payload(value.get("raw"))
+        calls = value.get("tool_calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if isinstance(call, dict) and isinstance(call.get("args"), dict):
+                    return _normalise_structured_payload(call["args"])
         if len(value) == 1:
             key, nested = next(iter(value.items()))
             if key in _JSON_WRAPPERS:

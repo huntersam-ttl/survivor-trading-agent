@@ -205,6 +205,26 @@ def test_include_raw_envelope_recovers_json_from_unparsed_provider_message():
     assert "**Confidence**: 0.7" in rendered
 
 
+def test_include_raw_envelope_recovers_decision_from_tool_call_arguments():
+    structured = MagicMock()
+    structured.invoke.return_value = {
+        "raw": AIMessage(
+            content="",
+            tool_calls=[{
+                "id": "call-1", "name": "PredictionMarketDecision",
+                "args": _decision().model_dump(),
+            }],
+        ),
+        "parsed": None,
+        "parsing_error": ValueError("structured parser did not decode tool call"),
+    }
+    rendered = invoke_structured_or_freetext(
+        structured, MagicMock(), "prompt", render_pm_decision, "PM",
+        schema=PredictionMarketDecision,
+    )
+    assert "**Rating**: Hold" in rendered
+
+
 def test_failure_diagnostics_are_bounded_and_field_specific():
     structured = MagicMock()
     structured.invoke.side_effect = [

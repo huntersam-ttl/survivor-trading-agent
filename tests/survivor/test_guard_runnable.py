@@ -148,6 +148,24 @@ def test_invoke_routes_through_model_router_with_role_metadata():
         assert seen["ticker_or_market"] == "mkt-x"
 
 
+@pytest.mark.unit
+def test_real_provider_route_does_not_send_local_transform_into_spawn_worker():
+    """Serialized specs, not local closures, cross the real provider boundary."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        llm, router, _ = _make_guarded_llm(tmpdir)
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return MagicMock(content="ok", usage_metadata={"input_tokens": 1, "output_tokens": 1})
+
+        router.invoke_role = spy
+        llm.bind_tools(["tool_a"]).invoke("use tools")
+
+        assert seen["llm_transform"] is None
+        assert seen["llm_specs"][0][0] == "bind_tools"
+
+
 # --- 3/4. bind_tools / with_structured_output remain guarded ---------------------------
 
 @pytest.mark.unit

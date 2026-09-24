@@ -168,6 +168,12 @@ class SurvivorLLM(Runnable):
 
                 return _KwargsBound()
 
+            # Real provider calls cross a multiprocessing ``spawn`` boundary.
+            # The serialized transform specs are sufficient there; the local
+            # closure is retained only for hermetic in-process test doubles.
+            routed_transform = (
+                transform_with_kwargs if "mock_client_factory" in router_kwargs else None
+            )
             return self._router.invoke_role(
                 role=self._role,
                 messages=input,
@@ -175,12 +181,17 @@ class SurvivorLLM(Runnable):
                 ticker_or_market=ticker_or_market,
                 est_input_tokens=estimate_input_tokens(input),
                 purpose="structured_output" if self._structured else "standard",
-                llm_transform=transform_with_kwargs,
+                llm_transform=routed_transform,
                 llm_specs=self._transform_specs,
                 **router_kwargs,
                 **self._llm_kwargs,
             )
 
+        # Never pass local closures to a spawned real-provider worker.  The
+        # provider reconstructs bind/structured transforms from llm_specs.
+        routed_transform = (
+            _chain_transforms(transforms) if "mock_client_factory" in router_kwargs else None
+        )
         return self._router.invoke_role(
             role=self._role,
             messages=input,
@@ -188,7 +199,7 @@ class SurvivorLLM(Runnable):
             ticker_or_market=ticker_or_market,
             est_input_tokens=estimate_input_tokens(input),
             purpose="structured_output" if self._structured else "standard",
-            llm_transform=_chain_transforms(transforms),
+            llm_transform=routed_transform,
             llm_specs=self._transform_specs,
             **router_kwargs,
             **self._llm_kwargs,

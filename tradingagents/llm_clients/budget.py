@@ -60,6 +60,22 @@ class BudgetManager:
     ) -> ReservationHandle:
         """PRE-CALL check: Verify limits and reserve budget atomically under lock."""
         ts = timestamp_utc or datetime.now(timezone.utc).isoformat()
+        # Ollama is a local, unpaid provider. Keep it in the same lifecycle so
+        # latency/status remain visible in the usage ledger, but never subject
+        # it to paid-provider pricing or budget reservations.
+        if provider.lower() == "ollama":
+            return ReservationHandle(
+                reservation_id=f"local-{uuid.uuid4()}",
+                provider="ollama",
+                model=model,
+                agent_role=agent_role,
+                est_input_tokens=est_input_tokens,
+                est_output_tokens=est_output_tokens,
+                est_gbp_pence=0,
+                timestamp_utc=ts,
+                run_id=run_id,
+                ticker_or_market=ticker_or_market,
+            )
         cur_date = ts[:10]
         cur_month = ts[:7]
 
@@ -157,7 +173,11 @@ class BudgetManager:
         with self._lock:
             self._pending_reservations.pop(handle.reservation_id, None)
 
-        if status == "SUCCESS":
+        if handle.provider.lower() == "ollama":
+            native_minor = 0
+            native_currency = "USD"
+            pence = 0
+        elif status == "SUCCESS":
             actual_cost = calculate_cost(
                 provider=handle.provider,
                 model=handle.model,

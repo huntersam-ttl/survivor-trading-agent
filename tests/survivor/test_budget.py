@@ -210,3 +210,28 @@ def test_budget_concurrency_reservation(temp_budget_manager):
     total_reserved = sum(h.est_gbp_pence for h in successful_handles)
     assert total_reserved <= 35
     assert len(successful_handles) + len(failed_errors) == 10
+
+
+@pytest.mark.unit
+def test_ollama_is_recorded_without_paid_budget_or_pricing(temp_budget_manager):
+    bm = temp_budget_manager
+    handle = bm.authorize_and_reserve(
+        provider="ollama",
+        model="gemma4:latest",
+        agent_role="research_manager",
+        est_input_tokens=1000000,
+        est_output_tokens=1000000,
+        run_id="local-run",
+        ticker_or_market="local-market",
+    )
+    assert handle.est_gbp_pence == 0
+    bm.settle_reservation(
+        handle,
+        actual_input_tokens=1000000,
+        actual_output_tokens=1000000,
+        latency_ms=123,
+    )
+    summary = bm.ledger.get_run_usage_summary("local-run")
+    assert summary["total_calls"] == 1
+    assert summary["total_cost_pence"] == 0
+    assert summary["breakdown"][0]["provider"] == "ollama"

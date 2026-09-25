@@ -31,6 +31,7 @@ STRONG = "fake/strong-model"
 @pytest.fixture(autouse=True)
 def _clean_pricing_catalog(monkeypatch):
     # Keep local operator configuration from leaking into hermetic tests.
+    monkeypatch.setenv("SURVIVOR_OLLAMA_FALLBACK_ENABLED", "false")
     monkeypatch.delenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
     monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)

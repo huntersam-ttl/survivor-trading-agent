@@ -33,7 +33,7 @@ from tradingagents.llm_clients.provider_health import ProviderHealthManager
 from tradingagents.llm_clients.router import ModelRouter, _role_routes_from_env
 from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
 from tradingagents.survivor.policy import SurvivorPolicy
-from tradingagents.survivor.types import RouteStatus, SurvivorError
+from tradingagents.survivor.types import RoleRoute, RouteStatus, SurvivorError
 
 CHEAP = "or/rotation-cheap"
 PRICY = "or/rotation-pricy"
@@ -49,6 +49,7 @@ def _clean_catalog():
 
 def _router(tmp_path, monkeypatch, *, models=None, pricing_map=None):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("SURVIVOR_OLLAMA_FALLBACK_ENABLED", "false")
     if models is not None:
         monkeypatch.setenv("SURVIVOR_OPENROUTER_MODELS", models)
     else:
@@ -279,17 +280,43 @@ def test_structured_output_repair_retries_same_then_rotates(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
-def test_structured_output_repair_stays_within_openrouter(tmp_path, monkeypatch):
+def test_structured_output_repair_falls_back_to_configured_ollama(tmp_path, monkeypatch):
     register_model_price(ModelPrice("openrouter", CHEAP, Decimal("0.01"), Decimal("0.02")))
     router, _ = _router(tmp_path, monkeypatch, models=CHEAP, pricing_map=f"{CHEAP}:0.01,0.02")
+    router.role_routes["trader"] = RoleRoute(
+        role="trader", preferred=[("openrouter", CHEAP)], fallback=[("ollama", "local-test")]
+    )
+    assert router._ordered_pool("trader")[0][-1] == ("ollama", "local-test")
     calls = []
     factory = _tracking_factory(calls, fail_models=(CHEAP,))
+    response = router.invoke_role(
+        "trader", "decide", purpose="structured_output", mock_client_factory=factory
+    )
+    assert response.usage_metadata["output_tokens"] == 10
+    assert [p for p, _ in calls] == ["openrouter", "openrouter", "ollama"]
+
+
+@pytest.mark.unit
+def test_malformed_ollama_structured_output_fails_closed(tmp_path, monkeypatch):
+    register_model_price(ModelPrice("openrouter", CHEAP, Decimal("0.01"), Decimal("0.02")))
+    router, _ = _router(tmp_path, monkeypatch, models=CHEAP, pricing_map=f"{CHEAP}:0.01,0.02")
+    router.role_routes["trader"] = RoleRoute(
+        role="trader", preferred=[("openrouter", CHEAP)], fallback=[("ollama", "local-test")]
+    )
+    calls = []
+    factory = _tracking_factory(calls, fail_models=(CHEAP, "local-test"))
     with pytest.raises(SurvivorError):
-        router.invoke_role(
-            "trader",
-            "decide",
-            purpose="structured_output",
-            mock_client_factory=factory,
-        )
-    # structured repair never fell back to a non-OpenRouter provider
-    assert {p for p, _ in calls} == {"openrouter"}
+        router.invoke_role("trader", "decide", purpose="structured_output", mock_client_factory=factory)
+    assert [p for p, _ in calls] == ["openrouter", "openrouter", "ollama", "ollama"]
+
+
+@pytest.mark.unit
+def test_ollama_uses_separate_bounded_deadline(monkeypatch):
+    from tradingagents.llm_clients.router import _provider_call_deadline_seconds
+
+    monkeypatch.delenv("SURVIVOR_LLM_CALL_DEADLINE_SECONDS", raising=False)
+    monkeypatch.delenv("SURVIVOR_OLLAMA_CALL_DEADLINE_SECONDS", raising=False)
+    assert _provider_call_deadline_seconds("openrouter") == 75.0
+    assert _provider_call_deadline_seconds("ollama") == 180.0
+    monkeypatch.setenv("SURVIVOR_OLLAMA_CALL_DEADLINE_SECONDS", "91")
+    assert _provider_call_deadline_seconds("ollama") == 91.0

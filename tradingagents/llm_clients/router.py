@@ -161,11 +161,17 @@ def _provider_call_worker(
         result_queue.close()
 
 
-def _provider_call_deadline_seconds() -> float:
+def _provider_call_deadline_seconds(provider: str | None = None) -> float:
+    env_name = (
+        "SURVIVOR_OLLAMA_CALL_DEADLINE_SECONDS"
+        if (provider or "").lower() == "ollama"
+        else "SURVIVOR_LLM_CALL_DEADLINE_SECONDS"
+    )
+    default = "180" if (provider or "").lower() == "ollama" else "75"
     try:
-        return max(0.1, float(os.environ.get("SURVIVOR_LLM_CALL_DEADLINE_SECONDS", "75")))
+        return max(0.1, float(os.environ.get(env_name, default)))
     except ValueError:
-        return 75.0
+        return float(default)
 
 
 def _invoke_with_deadline(
@@ -319,6 +325,14 @@ def _role_routes_from_env() -> dict[str, RoleRoute]:
     if not os.environ.get("OPENROUTER_API_KEY", "").strip():
         return dict(DEFAULT_ROLE_ROUTES)
 
+    ollama_fallback: list[tuple[str, str]] = []
+    if os.environ.get("SURVIVOR_OLLAMA_FALLBACK_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }:
+        model = os.environ.get("SURVIVOR_OLLAMA_MODEL", "gemma4:latest").strip()
+        if model:
+            ollama_fallback = [("ollama", model)]
+
     rotation = _split_models(os.environ.get("SURVIVOR_OPENROUTER_MODELS", ""))
     if not rotation:
         model = _configured_default_model()
@@ -343,7 +357,7 @@ def _role_routes_from_env() -> dict[str, RoleRoute]:
         routes[role] = RoleRoute(
             role=role,
             preferred=preferred,
-            fallback=available_fallback,
+            fallback=available_fallback + ollama_fallback,
         )
     return routes
 
@@ -493,14 +507,29 @@ class ModelRouter:
         all_routes = route.get_all_routes()
         openrouter = [pair for pair in all_routes if pair[0] == "openrouter"]
         others = [
-            pair for pair in all_routes if pair[0] != "openrouter" and _provider_available(pair[0])
+            pair
+            for pair in all_routes
+            if pair[0] != "openrouter" and pair[0].lower() != "ollama"
+            and _provider_available(pair[0])
+        ]
+        local = [
+            pair
+            for pair in all_routes
+            if pair[0].lower() == "ollama" and _provider_available(pair[0])
         ]
 
         or_ranked, or_skipped = self._rank_pool(role, openrouter)
+        local_ranked, local_skipped = self._rank_pool(role, local)
         if purpose == "structured_output":
-            return or_ranked, or_skipped
+            # Structured validation remains mandatory, but a local Ollama
+            # route is a safe fallback when all paid structured routes fail.
+            return or_ranked + local_ranked, {
+                "unknown_price": or_skipped.get("unknown_price", []),
+                "unhealthy": or_skipped.get("unhealthy", [])
+                + local_skipped.get("unhealthy", []),
+            }
         other_ranked, other_skipped = self._rank_pool(role, others)
-        ordered = or_ranked + other_ranked
+        ordered = or_ranked + other_ranked + local_ranked
         skipped: dict[str, list] = {
             "unknown_price": or_skipped.get("unknown_price", [])
             + other_skipped.get("unknown_price", []),
@@ -514,6 +543,8 @@ class ModelRouter:
         skipped: dict[str, list] = {"unknown_price": [], "unhealthy": []}
         priced: list[tuple[tuple[str, str], float]] = []
         for provider, model in pool:
+            if provider.lower() == "ollama":
+                continue
             if not self.health_manager.is_healthy(provider):
                 skipped["unhealthy"].append((provider, model))
                 continue
@@ -531,8 +562,13 @@ class ModelRouter:
             priced.append(((provider, model), cost))
 
         ordered: list[tuple[str, str]] = []
+        local_unpriced = [
+            (provider, model)
+            for provider, model in pool
+            if provider.lower() == "ollama" and self.health_manager.is_healthy(provider)
+        ]
         if not priced:
-            return ordered, skipped
+            return local_unpriced, skipped
         costs = [c for _, c in priced]
         min_cost, max_cost = min(costs), max(costs)
         span = max_cost - min_cost
@@ -558,6 +594,9 @@ class ModelRouter:
             scored.append((score, (provider, model), cost))
         scored.sort(key=lambda e: (-e[0], 0 if e[1][0] == "openrouter" else 1, e[2]))
         ordered = [pair for _, pair, _ in scored]
+        # Local fallback is deliberately last so a healthy paid route is still
+        # preferred when available. It has no provider price by design.
+        ordered.extend(local_unpriced)
         return ordered, skipped
 
     def _pool_empty_error(self, skipped: dict[str, list]) -> SurvivorError:
@@ -629,7 +668,7 @@ class ModelRouter:
                 else _invoke_with_deadline(
                     None,
                     messages,
-                    _provider_call_deadline_seconds(),
+                    _provider_call_deadline_seconds(provider),
                     provider=provider,
                     model=model,
                     llm_kwargs=llm_kwargs,

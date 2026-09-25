@@ -38,6 +38,12 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_local_live_fallback_in_unit_tests(monkeypatch):
+    """Keep the operator's local failover opt-in out of hermetic tests."""
+    monkeypatch.setenv("SURVIVOR_OLLAMA_FALLBACK_ENABLED", "false")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_survivor_runtime(tmp_path, monkeypatch):
     """Keep every survivor default mutable path inside this test's temp root."""
     root = tmp_path / "survivor-runtime"

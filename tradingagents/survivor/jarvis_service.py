@@ -105,12 +105,23 @@ class SurvivorHandlers:
         from tradingagents.survivor.autonomy import halt as halt_mod
         from tradingagents.survivor.autonomy.state import RuntimeState
         from tradingagents.survivor.execution.paper_broker import PaperBroker
+        from tradingagents.survivor.markets.adapter import FORBIDDEN_METHODS, MarketAdapter
+        from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
         from tradingagents.survivor.ops.health import heartbeat_read, watchdog_status
         from tradingagents.survivor.policy import SurvivorPolicy
         from tradingagents.survivor.risk.limits import risk_limits_from_env
 
         inj = self.inject
         broker = inj.broker or PaperBroker(limits=inj.settings or risk_limits_from_env())
+        adapter = inj.adapter or PolymarketAdapter()
+        # Attest only the concrete paper execution seam and the read-only
+        # market-data interface used by the cycle. Custom broker/adapter
+        # implementations remain unknown; absence is never guessed.
+        paper_broker_confirmed = type(broker) is PaperBroker
+        read_only_market_confirmed = isinstance(adapter, MarketAdapter) and not any(
+            hasattr(adapter, method) for method in FORBIDDEN_METHODS
+        )
+        paper_execution_confirmed = paper_broker_confirmed and read_only_market_confirmed
         state = inj.runtime_state or RuntimeState()
         policy = inj.policy or SurvivorPolicy.from_env()
         usage = inj.usage_ledger or InferenceUsageLedger()
@@ -120,6 +131,9 @@ class SurvivorHandlers:
         watchdog = watchdog_status(state)
         return {
             "mode": paper["mode"],
+            "broker_type": "paper" if paper_broker_confirmed else "unknown",
+            "live_broker_available": False if paper_broker_confirmed else None,
+            "live_order_transport_available": False if paper_execution_confirmed else None,
             "halted": halt_mod.is_halted(),
             "heartbeat": heartbeat,
             "watchdog": watchdog,

@@ -116,6 +116,9 @@ def test_health_status_budget_performance_positions(harness):
     status, body = request(server, "GET", "/v1/status")
     assert status == 200
     assert body["mode"] == "PAPER ONLY"
+    assert body["broker_type"] == "paper"
+    assert body["live_broker_available"] is False
+    assert body["live_order_transport_available"] is False
     assert body["halted"] in (True, False)
     assert "paper" in body and "ai_spend" in body and "cycle_count" in body
 
@@ -132,6 +135,24 @@ def test_health_status_budget_performance_positions(harness):
     # positions (fresh broker => none open)
     status, body = request(server, "GET", "/v1/positions")
     assert status == 200
+
+
+def test_status_does_not_attest_custom_broker(harness):
+    from tradingagents.survivor.jarvis_service import SurvivorHandlers
+
+    _, _, inject, *_ = harness
+    paper_broker = inject.broker
+
+    class CustomBroker:
+        def status(self):
+            return paper_broker.status()
+
+    inject.broker = CustomBroker()
+    body = SurvivorHandlers(inject).status()
+    assert body["broker_type"] == "unknown"
+    assert body["live_broker_available"] is None
+    assert body["live_order_transport_available"] is None
+
 def test_dry_run_blocks_execution(harness):
     start, request, _, adapter, research_calls = harness
     server = start()

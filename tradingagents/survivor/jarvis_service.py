@@ -109,6 +109,7 @@ class SurvivorHandlers:
         from tradingagents.survivor.markets.polymarket_adapter import PolymarketAdapter
         from tradingagents.survivor.ops.health import heartbeat_read, watchdog_status
         from tradingagents.survivor.policy import SurvivorPolicy
+        from tradingagents.survivor.pipeline import is_paper_enabled
         from tradingagents.survivor.risk.limits import risk_limits_from_env
 
         inj = self.inject
@@ -134,6 +135,7 @@ class SurvivorHandlers:
             "broker_type": "paper" if paper_broker_confirmed else "unknown",
             "live_broker_available": False if paper_broker_confirmed else None,
             "live_order_transport_available": False if paper_execution_confirmed else None,
+            "paper_run_enabled": is_paper_enabled(),
             "halted": halt_mod.is_halted(),
             "heartbeat": heartbeat,
             "watchdog": watchdog,
@@ -286,6 +288,21 @@ class SurvivorHandlers:
 
     def run_paper(self) -> dict:
         from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
+        from tradingagents.survivor.autonomy.halt import is_halted
+        from tradingagents.survivor.pipeline import is_paper_enabled
+
+        if is_halted():
+            return {
+                "status": "EXTERNAL_HALT",
+                "reason": "external HALT is active; operator action is required",
+                "paper_trades": 0,
+            }
+        if not is_paper_enabled():
+            return {
+                "status": "PAPER_OPT_IN_REQUIRED",
+                "reason": "TRADINGAGENTS_SURVIVOR_PAPER_ENABLED must be explicitly enabled",
+                "paper_trades": 0,
+            }
 
         return asdict(run_survivor_cycle(**self._run_kwargs(dry=False)))
 

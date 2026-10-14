@@ -569,6 +569,17 @@ def run_survivor_cycle(
         report.reason = "TRADINGAGENTS_SURVIVOR_AUTONOMY_ENABLED is not enabled"
         return report
 
+    # Any non-dry entrypoint must carry an explicit paper-execution opt-in.
+    # This guard lives in the cycle itself so alternate callers cannot bypass
+    # the service endpoint's protection.
+    if not dry_run_enabled(config):
+        from tradingagents.survivor.pipeline import is_paper_enabled
+
+        if not is_paper_enabled(config):
+            report.status = "PAPER_OPT_IN_REQUIRED"
+            report.reason = "paper execution requires explicit TRADINGAGENTS_SURVIVOR_PAPER_ENABLED opt-in"
+            return report
+
     limits = risk_limits_from_env()
     paper_ledger = None
     if paper_ledger_path:

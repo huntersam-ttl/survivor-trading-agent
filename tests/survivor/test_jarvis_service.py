@@ -44,6 +44,7 @@ def harness(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_INTELLIGENCE_ENABLED", "false")
     monkeypatch.delenv("SURVIVOR_DRY_RUN", raising=False)
     monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_ENABLED", raising=False)
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", raising=False)
     monkeypatch.delenv("SURVIVOR_JARVIS_TOKEN", raising=False)
 
     research_calls = {"n": 0}
@@ -119,6 +120,7 @@ def test_health_status_budget_performance_positions(harness):
     assert body["broker_type"] == "paper"
     assert body["live_broker_available"] is False
     assert body["live_order_transport_available"] is False
+    assert body["paper_run_enabled"] is False
     assert body["halted"] in (True, False)
     assert "paper" in body and "ai_spend" in body and "cycle_count" in body
 
@@ -167,7 +169,20 @@ def test_dry_run_blocks_execution(harness):
     assert adapter.list_calls > 0
 
 
-def test_paper_run_executes_paper_trade(harness):
+def test_paper_run_requires_explicit_opt_in(harness):
+    start, request, _, adapter, research_calls = harness
+    server = start()
+
+    status, report = request(server, "POST", "/v1/run/paper")
+    assert status == 200
+    assert report["status"] == "PAPER_OPT_IN_REQUIRED"
+    assert report["paper_trades"] == 0
+    assert adapter.list_calls == 0
+    assert research_calls["n"] == 0
+
+
+def test_paper_run_executes_paper_trade_only_after_explicit_opt_in(harness, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true")
     start, request, _, adapter, research_calls = harness
     server = start()
 

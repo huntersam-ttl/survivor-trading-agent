@@ -48,6 +48,21 @@ def test_disabled_by_default(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_paper_cycle_requires_explicit_opt_in_before_market_or_research(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", raising=False)
+    adapter = FakeMarketAdapter([make_snapshot()])
+    report = run_survivor_cycle(
+        _config(), adapter=adapter,
+        research_fn=lambda *_: pytest.fail("research must not run without paper opt-in"),
+        paper_ledger_path=str(tmp_path / "paper.db"),
+        runtime_state=RuntimeState(db_path=str(tmp_path / "runtime.db")),
+    )
+    assert report.status == "PAPER_OPT_IN_REQUIRED"
+    assert report.paper_trades == 0
+    assert adapter.list_calls == 0
+
+
+@pytest.mark.unit
 def test_external_halt_blocks_everything(tmp_path, monkeypatch):
     """HALT file -> zero adapter calls, zero research, zero proposals, zero executions."""
     adapter = FakeMarketAdapter([make_snapshot() for _ in range(5)])

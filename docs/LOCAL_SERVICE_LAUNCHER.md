@@ -206,3 +206,18 @@ The combined `tests/survivor` regression suite passes **346 tests**. Fixture
 isolation explicitly opts hermetic tests into paper execution only within their
 temporary test process and pins mocked router tests to a catalog-priced model;
 production safety gates and credentials are unchanged.
+
+# One-shot paper acceptance reservation
+
+`tradingagents.survivor.acceptance.PaperAcceptanceStore` is an offline
+reservation/reconciliation primitive. It atomically binds an operator
+acceptance ID to a request fingerprint and never reuses terminal or
+post-dispatch uncertain IDs. On process recovery, persisted DISPATCHED records
+become RECONCILIATION_REQUIRED. It does not change the service's HALT file,
+paper opt-in, or execute a cycle.
+
+This does not yet provide the complete two-service Jarvis/TradingAgents
+acceptance protocol. Do not clear HALT, enable paper, or invoke a cycle based
+on these primitives. Cross-service scoped authorization, restoration ownership,
+and actual Mission-journaled runtime dispatch remain blocked and require a
+separate verified implementation.

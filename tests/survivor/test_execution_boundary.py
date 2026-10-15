@@ -85,7 +85,10 @@ def test_duplicate_proposal_cannot_execute_twice(tmp_path):
 
 
 @pytest.mark.unit
-def test_paper_disabled_preserves_upstream_behavior(tmp_path):
+def test_paper_disabled_preserves_upstream_behavior(tmp_path, monkeypatch):
+    # survivor/conftest.py opts in globally for tests that exercise fills;
+    # this case specifically verifies the default-deny path.
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", raising=False)
     assert is_paper_enabled({}) is False
     config = _paper_config(tmp_path)
     config["survivor_paper_enabled"] = False

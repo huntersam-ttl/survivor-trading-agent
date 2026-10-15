@@ -3,6 +3,10 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 
+class InvalidModelResponseError(ValueError):
+    """The provider returned no usable text or structured tool call."""
+
+
 def normalize_content(response):
     """Normalize LLM response content to a plain string.
 
@@ -11,6 +15,9 @@ def normalize_content(response):
     Downstream agents expect response.content to be a string. This extracts
     and joins the text blocks, discarding reasoning/metadata blocks.
     """
+    if not hasattr(response, "content"):
+        raise InvalidModelResponseError("Provider response has no message content.")
+
     content = response.content
     if isinstance(content, list):
         texts = [
@@ -19,6 +26,21 @@ def normalize_content(response):
             for item in content
         ]
         response.content = "\n".join(t for t in texts if t)
+
+    text = response.content
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        raise InvalidModelResponseError("Provider response content has an unsupported type.")
+
+    # Some reasoning models spend a small output budget entirely on hidden
+    # reasoning and return an empty `content`. Never let that look like a
+    # successful text completion. A tool-call-only AIMessage remains valid for
+    # structured-output/tool-binding flows; their schema parser validates the
+    # call before a domain decision is produced.
+    tool_calls = getattr(response, "tool_calls", None)
+    if not text.strip() and not tool_calls:
+        raise InvalidModelResponseError("Provider response contained no usable text or tool call.")
     return response
 
 

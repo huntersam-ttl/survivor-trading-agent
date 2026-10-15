@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tradingagents.survivor-paper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/cc/tradingagents-paper-attestation/.venv/bin/python</string>
+		<string>/Users/cc/tradingagents-paper-attestation/scripts/tradingagents_service_launcher.py</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/cc/tradingagents-paper-attestation</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>Umask</key>
+	<integer>63</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/cc/.jarvis/tradingagents-paper-attestation-service/logs/service.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/cc/.jarvis/tradingagents-paper-attestation-service/logs/service.err.log</string>
+</dict>
+</plist>

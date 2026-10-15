@@ -192,7 +192,17 @@ implies HALT is clear or enables paper execution. The configured test HALT path
 is used consistently by both service status and the liveness attestation.
 
 The isolated heartbeat lifecycle, service status, and safety regressions pass
-offline. This code has not been loaded into the already-running LaunchAgent;
-the service must be reloaded under separate authorization before the live
-`service_heartbeat` can be observed. No provider request, cycle, or order was
-made for this change.
+offline. After the authorized reload, LaunchAgent PID 2488 owns port 8765 and
+authenticated `GET /v1/status` returned HTTP 200 with `service_heartbeat` present
+and consistent, age about 2.4 seconds, `halt_state=HALTED`, and `service_pid=2488`.
+The previous listener PID was 91308. Status remains PAPER ONLY, HALT true,
+paper opt-in false, live broker/order transport false, cycle count zero, and
+last cycle null. `paper.db` and `runtime.db` both pass SQLite integrity checks;
+paper events and cycles remain zero. The process received the dedicated
+OpenRouter provider configuration; only the key-presence boolean was inspected.
+No provider request, cycle, or order was made during reload verification.
+
+The combined `tests/survivor` regression suite passes **346 tests**. Fixture
+isolation explicitly opts hermetic tests into paper execution only within their
+temporary test process and pins mocked router tests to a catalog-priced model;
+production safety gates and credentials are unchanged.

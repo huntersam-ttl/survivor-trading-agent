@@ -413,6 +413,25 @@ def test_heartbeat_derives_halted_from_authoritative_file(tmp_path, monkeypatch)
 
 
 @pytest.mark.unit
+def test_missing_cycle_heartbeat_is_not_consistent_even_when_service_is_clear(tmp_path, monkeypatch):
+    path = str(tmp_path / "missing-cycle-heartbeat.json")
+    halt_path = str(tmp_path / "HALT")
+    monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
+    status = heartbeat_read(path)
+    assert status["present"] is False
+    assert status["consistent"] is False
+    assert "timestamp_utc" not in status
+    assert status["halt_state"] == "CLEAR"
+
+
+@pytest.mark.unit
+def test_effective_halt_does_not_look_like_a_paper_risk_breach():
+    from tradingagents.survivor.ops.health import _paper_risk_breach
+
+    assert _paper_risk_breach({"risk_state": "ACTIVE", "trading_state": "HALTED"}) is False
+
+
+@pytest.mark.unit
 def test_successful_market_probes_preserve_history_and_reset_active(tmp_path):
     state = RuntimeState(db_path=str(tmp_path / "runtime.db"))
     state.set_watchdog("consecutive_market_failures", 31)

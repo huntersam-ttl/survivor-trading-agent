@@ -254,3 +254,35 @@ that token and the configured identity independently at its HTTP endpoint,
 then uses the existing bridge bearer token for service-to-service requests.
 Jarvis also compares the remote reservation fingerprint with its own before
 requesting authorization.
+
+## Runtime status contract repair (2026-10-15)
+
+The authenticated `GET /v1/status` returns two independent heartbeat objects:
+`service_heartbeat` is process-bound liveness refreshed by the active HTTP
+service and includes process identity/current HALT evidence; `heartbeat` and
+`cycle_heartbeat` describe actual cycle/trial activity. A zero-cycle service
+has no cycle timestamp, and the service does not synthesize one.
+
+Deployment readiness may use a fresh, consistent `service_heartbeat` for a
+halted zero-cycle service. It must still verify the process identity and all
+other deployment safety controls. This is not execution authorization; the
+existing HALT, opt-in, broker/transport, risk, and one-call gates remain
+unchanged.
+
+Within the paper status object, `risk_state` reports PaperBroker risk limits.
+`trading_state` reports effective execution state, so HALT takes precedence
+over an otherwise ACTIVE risk state. `execution_eligible` is false whenever
+HALT is active, paper opt-in is off, capability evidence is missing, service
+liveness is invalid, risk state blocks, or autonomous execution is enabled.
+
+The isolated offline regression on 2026-10-15 passed **78 focused tests** and
+the full TradingAgents suite passed **1,059 tests, 2 skipped, and 71
+subtests**. The live, authenticated pre-reload status check returned HTTP 200
+in 56.3 ms for PID 2488: PAPER ONLY, HALT active, paper opt-in false, both
+live broker/transport attestations false, fresh process heartbeat, absent
+cycle heartbeat, zero cycles, and no last-cycle timestamp. The old loaded code
+still returned `paper.trading_state=ACTIVE`; this is the PaperBroker risk
+state and was not treated as execution authorization. The new status contract
+reports this as `risk_state=ACTIVE`, effective `trading_state=HALTED`, and
+`execution_eligible=false` while HALT is active. No provider request or cycle
+was made during these checks.

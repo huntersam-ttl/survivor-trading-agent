@@ -309,23 +309,59 @@ class SurvivorHandlers:
         paper = broker.status()
         last = state.last_cycle()
         heartbeat = heartbeat_read()
+        halted = halt_mod.is_halted((inj.config_overrides or {}).get("_halt_path"))
+        paper_run_enabled = is_paper_enabled()
+        autonomy_enabled = os.environ.get("TRADINGAGENTS_SURVIVOR_AUTONOMY_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
         service_heartbeat = (
             inj.service_heartbeat.read()
             if inj.service_heartbeat is not None
             else missing_service_heartbeat()
         )
+        raw_risk_state = str(paper.get("trading_state", "UNKNOWN"))
+        paper_mode = str(paper.get("mode", "")).strip().upper().replace(" ", "_") in {"PAPER", "PAPER_ONLY"}
+        heartbeat_age = service_heartbeat.get("age_seconds")
+        heartbeat_fresh = (
+            isinstance(heartbeat_age, (int, float)) and not isinstance(heartbeat_age, bool)
+            and 0 <= heartbeat_age <= 30
+        )
+        execution_eligible = (
+            not halted and paper_mode and policy.real_trading_enabled is False
+            and paper_run_enabled and raw_risk_state in {"ACTIVE", "PAPER"}
+            and paper_execution_confirmed
+            and service_heartbeat.get("present") is True
+            and service_heartbeat.get("consistent") is True
+            and heartbeat_fresh and not autonomy_enabled
+        )
+        if halted:
+            effective_trading_state = "HALTED"
+        elif not paper_run_enabled:
+            effective_trading_state = "OPT_IN_DISABLED"
+        elif not paper_mode or policy.real_trading_enabled is not False:
+            effective_trading_state = "PAPER_MODE_UNVERIFIED"
+        elif raw_risk_state not in {"ACTIVE", "PAPER"}:
+            effective_trading_state = raw_risk_state
+        elif not paper_execution_confirmed:
+            effective_trading_state = "EXECUTION_CAPABILITY_UNVERIFIED"
+        elif not heartbeat_fresh or service_heartbeat.get("consistent") is not True:
+            effective_trading_state = "SERVICE_HEARTBEAT_UNAVAILABLE"
+        elif autonomy_enabled:
+            effective_trading_state = "AUTONOMY_ENABLED"
+        else:
+            effective_trading_state = "ELIGIBLE"
         watchdog = watchdog_status(state)
         return {
             "mode": paper["mode"],
             "broker_type": "paper" if paper_broker_confirmed else "unknown",
             "live_broker_available": False if paper_broker_confirmed else None,
             "live_order_transport_available": False if paper_execution_confirmed else None,
-            "paper_run_enabled": is_paper_enabled(),
-            "halted": halt_mod.is_halted((inj.config_overrides or {}).get("_halt_path")),
+            "paper_run_enabled": paper_run_enabled,
+            "autonomous_execution_enabled": autonomy_enabled,
+            "halted": halted,
             # `heartbeat` remains the cycle/trial heartbeat. This distinct
             # field proves only that this HTTP service process is alive.
             "service_heartbeat": service_heartbeat,
             "heartbeat": heartbeat,
+            "cycle_heartbeat": heartbeat,
             "watchdog": watchdog,
             "survivor_enabled": bool(is_survivor_enabled()),
             "cycle_count": state.cycle_count(),
@@ -341,7 +377,10 @@ class SurvivorHandlers:
                 "drawdown_bps": paper["drawdown_bps"],
                 "daily_pnl_pence": paper["daily_pnl_pence"],
                 "open_positions": paper["open_positions"],
-                "trading_state": paper["trading_state"],
+                # PaperBroker ACTIVE is its risk state, not permission to execute.
+                "risk_state": raw_risk_state,
+                "trading_state": effective_trading_state,
+                "execution_eligible": execution_eligible,
             },
             "ai_spend": {
                 "daily_pence": usage.get_daily_spend_pence(None),

@@ -131,6 +131,14 @@ def test_health_status_budget_performance_positions(harness):
     assert body["live_broker_available"] is False
     assert body["live_order_transport_available"] is False
     assert body["paper_run_enabled"] is False
+    assert body["autonomous_execution_enabled"] is False
+    assert body["heartbeat"]["present"] is False
+    assert body["heartbeat"]["consistent"] is False
+    assert body["cycle_heartbeat"] == body["heartbeat"]
+    assert body["cycle_heartbeat"].get("timestamp_utc") is None
+    assert body["paper"]["risk_state"] == "ACTIVE"
+    assert body["paper"]["trading_state"] == "OPT_IN_DISABLED"
+    assert body["paper"]["execution_eligible"] is False
     assert body["halted"] in (True, False)
     assert "paper" in body and "ai_spend" in body and "cycle_count" in body
 
@@ -149,12 +157,16 @@ def test_status_reports_live_service_and_active_halt_without_cycle(harness):
     assert body["service_heartbeat"]["halt_state"] == "HALTED"
     assert body["cycle_count"] == 0
     assert body["last_cycle"] is None
+    assert body["heartbeat"]["present"] is False
+    assert body["heartbeat"]["consistent"] is False
+    assert body["paper"]["risk_state"] == "ACTIVE"
+    assert body["paper"]["trading_state"] == "HALTED"
+    assert body["paper"]["execution_eligible"] is False
 
     # budget
     status, body = request(server, "GET", "/v1/budget")
     assert status == 200
     assert "daily" in body and "monthly" in body
-
     # performance
     status, body = request(server, "GET", "/v1/performance")
     assert status == 200
@@ -163,6 +175,76 @@ def test_status_reports_live_service_and_active_halt_without_cycle(harness):
     # positions (fresh broker => none open)
     status, body = request(server, "GET", "/v1/positions")
     assert status == 200
+
+
+@pytest.mark.parametrize(
+    ("halted", "paper_opt_in", "expected_state", "expected_eligible"),
+    [
+        (True, False, "HALTED", False),
+        (True, True, "HALTED", False),
+        (False, False, "OPT_IN_DISABLED", False),
+        (False, True, "ELIGIBLE", True),
+    ],
+)
+def test_paper_status_contract_resolves_halt_opt_in_combinations(
+    harness, monkeypatch, halted, paper_opt_in, expected_state, expected_eligible,
+):
+    start, request, inject, _, research_calls = harness
+    halt_path = Path(inject.config_overrides["_halt_path"])
+    if halted:
+        halt_path.write_text("HALT\n")
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true" if paper_opt_in else "false")
+    server = start()
+    status, body = request(server, "GET", "/v1/status")
+    assert status == 200
+    assert body["cycle_count"] == 0 and body["last_cycle"] is None
+    assert body["paper"]["risk_state"] == "ACTIVE"
+    assert body["paper"]["trading_state"] == expected_state
+    assert body["paper"]["execution_eligible"] is expected_eligible
+    assert body["cycle_heartbeat"]["present"] is False
+    assert body["service_heartbeat"]["present"] is True
+    assert body["service_heartbeat"]["consistent"] is True
+    assert research_calls["n"] == 0
+
+
+@pytest.mark.parametrize(
+    ("blocked_gate", "expected_state"),
+    [
+        ("stale_service_heartbeat", "SERVICE_HEARTBEAT_UNAVAILABLE"),
+        ("autonomy_enabled", "AUTONOMY_ENABLED"),
+        ("unverified_execution_capability", "EXECUTION_CAPABILITY_UNVERIFIED"),
+        ("risk_block", "DAILY_HALT"),
+    ],
+)
+def test_paper_status_contract_fails_closed_for_conflicting_gates(
+    harness, monkeypatch, blocked_gate, expected_state,
+):
+    start, request, inject, _, research_calls = harness
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true")
+    if blocked_gate == "autonomy_enabled":
+        monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_AUTONOMY_ENABLED", "true")
+    elif blocked_gate == "unverified_execution_capability":
+        inject.adapter = object()
+    elif blocked_gate == "risk_block":
+        broker_status = inject.broker.status
+        monkeypatch.setattr(inject.broker, "status", lambda: {**broker_status(), "trading_state": "DAILY_HALT"})
+
+    server = start()
+    if blocked_gate == "stale_service_heartbeat":
+        monkeypatch.setattr(
+            inject.service_heartbeat, "read",
+            lambda: {
+                "heartbeat_type": "service_liveness", "present": True,
+                "consistent": False, "timestamp_utc": None,
+                "age_seconds": 31, "halted": False, "halt_state": "CLEAR",
+            },
+        )
+    status, body = request(server, "GET", "/v1/status")
+    assert status == 200
+    assert body["paper"]["trading_state"] == expected_state
+    assert body["paper"]["execution_eligible"] is False
+    assert body["cycle_count"] == 0 and body["last_cycle"] is None
+    assert research_calls["n"] == 0
 
 
 def test_status_does_not_attest_custom_broker(harness):

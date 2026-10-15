@@ -49,6 +49,12 @@ def _db_ok(path: str) -> bool:
     return row[0] == "ok"
 
 
+def _paper_risk_breach(paper_status: dict) -> bool:
+    """Read risk state separately from HALT/effective execution state."""
+    risk_state = paper_status.get("risk_state", paper_status.get("trading_state", "ACTIVE"))
+    return str(risk_state) not in {"ACTIVE", "PAPER"}
+
+
 def preflight_check(
     *,
     survivor_dir: str | None = None,
@@ -246,7 +252,7 @@ def recovery_preflight(
     market_healthy = all(p["fresh"] and p["schema_valid"] for p in probes)
     paper_mode = str(paper_status.get("mode", "")) in {"PAPER", "PAPER ONLY", "PAPER_ONLY"}
     positions = int(paper_status.get("open_positions", 0) or 0)
-    risk_breach = str(paper_status.get("trading_state", "ACTIVE")) not in {"ACTIVE", "PAPER"}
+    risk_breach = _paper_risk_breach(paper_status)
     reasons = []
     if not paper_mode: reasons.append("paper_mode_required")
     if not market_healthy: reasons.append("current_market_health_not_healthy")
@@ -388,7 +394,7 @@ def heartbeat_read(heartbeat_path: str | None = None) -> dict:
     """Read heartbeat with derived HALT state; never trusts stale CLEAR."""
     path = heartbeat_path or HEARTBEAT_PATH
     if not os.path.exists(path):
-        return {"present": False, "consistent": not is_halted(), "halt_state": "HALTED" if is_halted() else "CLEAR"}
+        return {"present": False, "consistent": False, "halt_state": "HALTED" if is_halted() else "CLEAR"}
     try:
         with open(path) as fh:
             payload = json.load(fh)

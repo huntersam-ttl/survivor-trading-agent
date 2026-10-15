@@ -10,6 +10,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +73,7 @@ def harness(tmp_path, monkeypatch):
         config_overrides={
             "jarvis_intelligence_enabled": False,
             "_heartbeat_path": str(tmp_path / "heartbeat.json"),
+            "_halt_path": str(tmp_path / "HALT"),
             "_evaluation_db_path": eval_path,
         },
     )
@@ -94,12 +96,14 @@ def harness(tmp_path, monkeypatch):
         server = make_server(port=0, token=token, inject=inject)
         if server.server_address[0] != BIND_HOST:
             raise AssertionError(f"service did not bind to {BIND_HOST}")
+        server.service_heartbeat.start()
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
     yield start, request, inject, adapter, research_calls
     if server is not None:
         server.shutdown()
+        server.service_heartbeat.stop()
         server.server_close()
 
 
@@ -117,12 +121,34 @@ def test_health_status_budget_performance_positions(harness):
     status, body = request(server, "GET", "/v1/status")
     assert status == 200
     assert body["mode"] == "PAPER ONLY"
+    assert body["service_heartbeat"]["present"] is True
+    assert body["service_heartbeat"]["consistent"] is True
+    assert body["service_heartbeat"]["heartbeat_type"] == "service_liveness"
+    assert body["halted"] is False
+    assert body["cycle_count"] == 0
+    assert body["last_cycle"] is None
     assert body["broker_type"] == "paper"
     assert body["live_broker_available"] is False
     assert body["live_order_transport_available"] is False
     assert body["paper_run_enabled"] is False
     assert body["halted"] in (True, False)
     assert "paper" in body and "ai_spend" in body and "cycle_count" in body
+
+
+def test_status_reports_live_service_and_active_halt_without_cycle(harness):
+    start, request, inject, *_ = harness
+    halt_path = Path(inject.config_overrides["_halt_path"])
+    halt_path.write_text("SURVIVOR PAPER AUTONOMY HALT\n")
+    server = start()
+    status, body = request(server, "GET", "/v1/status")
+    assert status == 200
+    assert body["halted"] is True
+    assert body["service_heartbeat"]["present"] is True
+    assert body["service_heartbeat"]["consistent"] is True
+    assert body["service_heartbeat"]["halted"] is True
+    assert body["service_heartbeat"]["halt_state"] == "HALTED"
+    assert body["cycle_count"] == 0
+    assert body["last_cycle"] is None
 
     # budget
     status, body = request(server, "GET", "/v1/budget")

@@ -31,6 +31,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
+from tradingagents.survivor.ops.service_heartbeat import (
+    ServiceLivenessHeartbeat,
+    missing_service_heartbeat,
+)
+
 logger = logging.getLogger(__name__)
 
 BIND_HOST = "127.0.0.1"  # hard-coded: localhost-only, never configurable
@@ -67,6 +72,7 @@ class ServiceInjection:
     lock_path: str | None = None
     settings: Any = None            # risk limits used to build a read-only broker
     broker: Any = None              # pre-built read-only PaperBroker
+    service_heartbeat: Any = None   # in-process HTTP service liveness owner
     evaluation_db_path: str | None = None
     config_overrides: dict = field(default_factory=dict)  # extra run-cycle config keys
 
@@ -129,6 +135,11 @@ class SurvivorHandlers:
         paper = broker.status()
         last = state.last_cycle()
         heartbeat = heartbeat_read()
+        service_heartbeat = (
+            inj.service_heartbeat.read()
+            if inj.service_heartbeat is not None
+            else missing_service_heartbeat()
+        )
         watchdog = watchdog_status(state)
         return {
             "mode": paper["mode"],
@@ -136,7 +147,10 @@ class SurvivorHandlers:
             "live_broker_available": False if paper_broker_confirmed else None,
             "live_order_transport_available": False if paper_execution_confirmed else None,
             "paper_run_enabled": is_paper_enabled(),
-            "halted": halt_mod.is_halted(),
+            "halted": halt_mod.is_halted((inj.config_overrides or {}).get("_halt_path")),
+            # `heartbeat` remains the cycle/trial heartbeat. This distinct
+            # field proves only that this HTTP service process is alive.
+            "service_heartbeat": service_heartbeat,
             "heartbeat": heartbeat,
             "watchdog": watchdog,
             "survivor_enabled": bool(is_survivor_enabled()),
@@ -415,7 +429,13 @@ def make_server(
     """Build (but do not start) the localhost server. Binds only to 127.0.0.1."""
     resolved_token = (token if token is not None else os.environ.get("SURVIVOR_JARVIS_TOKEN", "")).strip()
     server = _SurvivorServer((BIND_HOST, port), _JarvisRequestHandler)
-    server.app = JarvisApp(SurvivorHandlers(inject or ServiceInjection()), resolved_token)
+    resolved_inject = inject or ServiceInjection()
+    if resolved_inject.service_heartbeat is None:
+        resolved_inject.service_heartbeat = ServiceLivenessHeartbeat(
+            halt_path=(resolved_inject.config_overrides or {}).get("_halt_path"),
+        )
+    server.service_heartbeat = resolved_inject.service_heartbeat
+    server.app = JarvisApp(SurvivorHandlers(resolved_inject), resolved_token)
     server.token = resolved_token
     server.daemon_threads = True
     return server
@@ -429,10 +449,15 @@ def serve(*, port: int = DEFAULT_PORT) -> None:
     sys.stderr.write(f"SURVIVOR jarvis localhost service on {host}:{bound_port} (bearer token {token_state})\n")
     sys.stderr.flush()
     try:
+        # The heartbeat belongs to this bound HTTP service process, not a
+        # trading cycle or a standalone writer. Its identity is checked again
+        # by every status read, and it stops/cleans up with this lifecycle.
+        server.service_heartbeat.start()
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.service_heartbeat.stop()
         server.server_close()
 
 

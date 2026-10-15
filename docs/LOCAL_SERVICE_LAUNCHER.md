@@ -170,3 +170,29 @@ dry run remains enabled. The launcher revalidated the captured risk limits
 before startup. No HALT change, opt-in change, trading cycle, or fill occurred.
 Pre- and post-reload redacted status records are kept outside the checkout in
 the owner-only `.jarvis/tradingagents-paper-attestation-service` directory.
+
+## Independent service-liveness heartbeat implementation
+
+The prior status heartbeat was written by cycle progress/completion only. With
+HALT active, that design could never bootstrap the heartbeat required by paper
+preflight. The service now owns a distinct `service_heartbeat` status object,
+written atomically and refreshed every five seconds by a thread started only
+after the authenticated HTTP server has bound its listener. It is bound to the
+service PID and a per-start random instance ID, and status validates the
+instance, refresher thread, timestamp freshness, and current HALT state. An
+orderly shutdown removes only that instance's file; an abrupt shutdown leaves
+evidence that becomes stale and fails closed. A standalone helper cannot claim
+that the HTTP service is alive.
+
+The existing `heartbeat` remains cycle/trial data. It is not copied into
+`service_heartbeat`, and last-cycle status remains sourced from the runtime
+cycle journal (`last_cycle`), which is null before the first cycle. HALT is
+reported independently and remains authoritative; service liveness never
+implies HALT is clear or enables paper execution. The configured test HALT path
+is used consistently by both service status and the liveness attestation.
+
+The isolated heartbeat lifecycle, service status, and safety regressions pass
+offline. This code has not been loaded into the already-running LaunchAgent;
+the service must be reloaded under separate authorization before the live
+`service_heartbeat` can be observed. No provider request, cycle, or order was
+made for this change.

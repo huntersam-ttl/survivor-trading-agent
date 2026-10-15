@@ -207,17 +207,33 @@ isolation explicitly opts hermetic tests into paper execution only within their
 temporary test process and pins mocked router tests to a catalog-priced model;
 production safety gates and credentials are unchanged.
 
-# One-shot paper acceptance reservation
+# One-shot paper acceptance protocol (offline implementation only)
 
-`tradingagents.survivor.acceptance.PaperAcceptanceStore` is an offline
-reservation/reconciliation primitive. It atomically binds an operator
-acceptance ID to a request fingerprint and never reuses terminal or
-post-dispatch uncertain IDs. On process recovery, persisted DISPATCHED records
-become RECONCILIATION_REQUIRED. It does not change the service's HALT file,
-paper opt-in, or execute a cycle.
+The isolated service now exposes authenticated acceptance reservation,
+authorization, result-read, and one-shot dispatch routes. A SQLite WAL/FULL
+sync store atomically binds each acceptance ID to a canonical request
+fingerprint. A separate `BEGIN IMMEDIATE` state transition elects one dispatch
+winner across processes before it can release the service HALT. Terminal and
+uncertain IDs are non-reusable; recovery changes interrupted dispatches to
+`RECONCILIATION_REQUIRED` and reasserts HALT. POST is never retried after an
+ambiguous outcome; status retrieval is GET-only.
 
-This does not yet provide the complete two-service Jarvis/TradingAgents
-acceptance protocol. Do not clear HALT, enable paper, or invoke a cycle based
-on these primitives. Cross-service scoped authorization, restoration ownership,
-and actual Mission-journaled runtime dispatch remain blocked and require a
-separate verified implementation.
+Dispatch requires an explicitly PAPER-only request, the concrete PaperBroker,
+both live capability attestations false, the global
+`TRADINGAGENTS_SURVIVOR_PAPER_ENABLED` flag still false, current HALT true,
+fresh process-bound service liveness, and autonomous execution disabled. Only
+the accepted call receives an in-memory paper permit. The service records
+actual RiskEngine/report fields and appended PaperLedger IDs/hashes; it does
+not synthesize fills. It restores and verifies HALT and the disabled global
+opt-in in a `finally` path. A failed restoration or uncertain cycle remains
+durably reconciliation-required. This protocol is not a generic paper-run
+switch and is not called by the autonomous supervisor or ordinary run route.
+
+This implementation has only been exercised offline with temporary stores and
+injected cycle functions. No provider call, runtime acceptance request, cycle,
+or order was run. The currently running service has not been reloaded with
+these changes. Before any future runtime use, the operator must separately
+provision/configure the service's authenticated Jarvis bridge and the distinct
+Jarvis operator authorization privately, deploy both matching commits, and
+perform a new read-only preflight. Never clear a running HALT or enable
+runtime paper execution as part of deployment or health checking.

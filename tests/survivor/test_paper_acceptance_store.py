@@ -12,6 +12,16 @@ def _reserve(path, barrier, output):
     output.put(created)
 
 
+def _claim_dispatch(path, barrier, output):
+    store = PaperAcceptanceStore(path)
+    barrier.wait(timeout=5)
+    try:
+        store.mark_dispatched("operator-acceptance-race-001")
+        output.put("claimed")
+    except AcceptanceConflict:
+        output.put("denied")
+
+
 def test_independent_processes_atomically_reserve_same_acceptance(tmp_path):
     ctx = multiprocessing.get_context("spawn")
     barrier, output = ctx.Barrier(2), ctx.Queue()
@@ -50,3 +60,21 @@ def test_crash_before_dispatch_remains_reserved_and_requires_explicit_authorizat
     record, _ = store.reserve("operator-acceptance-003", {"mode": "PAPER"})
     assert store.recover_interrupted() == []
     assert store.get(record.acceptance_id).status == "RESERVED"
+
+
+def test_two_processes_cannot_claim_the_dispatch_boundary_twice(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    path = str(tmp_path / "dispatch.db")
+    store = PaperAcceptanceStore(path)
+    store.reserve("operator-acceptance-race-001", {"mode": "PAPER"})
+    store.authorize("operator-acceptance-race-001", ttl_seconds=60)
+    barrier, output = ctx.Barrier(2), ctx.Queue()
+    processes = [ctx.Process(target=_claim_dispatch, args=(path, barrier, output)) for _ in range(2)]
+    for proc in processes:
+        proc.start()
+    winners = [output.get(timeout=10) for _ in processes]
+    for proc in processes:
+        proc.join(timeout=10)
+        assert proc.exitcode == 0
+    assert sorted(winners) == ["claimed", "denied"]
+    assert store.get("operator-acceptance-race-001").status == "DISPATCHED"

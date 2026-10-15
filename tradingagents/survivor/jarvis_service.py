@@ -75,6 +75,9 @@ class ServiceInjection:
     service_heartbeat: Any = None   # in-process HTTP service liveness owner
     evaluation_db_path: str | None = None
     config_overrides: dict = field(default_factory=dict)  # extra run-cycle config keys
+    acceptance_store: Any = None
+    status_fn: Any = None              # deterministic local service test seam
+    cycle_fn: Any = None               # hermetic single-call test seam
 
 
 _CYCLE_KWARGS = (
@@ -95,6 +98,164 @@ class SurvivorHandlers:
     def __init__(self, inject: ServiceInjection | None = None):
         self.inject = inject or ServiceInjection()
 
+    def _acceptance_store(self):
+        if self.inject.acceptance_store is None:
+            from tradingagents.survivor.acceptance import PaperAcceptanceStore
+            self.inject.acceptance_store = PaperAcceptanceStore()
+        return self.inject.acceptance_store
+
+    def acceptance_status(self, acceptance_id: str) -> dict:
+        record = self._acceptance_store().get(acceptance_id)
+        if record is None:
+            raise ApiError(404, "ACCEPTANCE_NOT_FOUND", "paper acceptance reservation not found")
+        return {"acceptance_id": record.acceptance_id, "fingerprint": record.fingerprint,
+                "status": record.status, "result": record.result}
+
+    def acceptance_reserve(self, payload: dict) -> dict:
+        if not isinstance(payload, dict) or set(payload) != {"acceptance_id", "request"}:
+            raise ApiError(400, "INVALID_ACCEPTANCE_REQUEST", "acceptance_id and request are required")
+        request = payload.get("request")
+        if (not isinstance(request, dict) or request.get("mode") != "PAPER_RUNTIME"
+                or request.get("cycle") not in {"single_provider_cycle", None}
+                or set(request) - {"mode", "cycle", "symbol", "signal_timestamp"}):
+            raise ApiError(400, "INVALID_ACCEPTANCE_REQUEST", "only allowlisted PAPER_RUNTIME requests are accepted")
+        try:
+            record, created = self._acceptance_store().reserve(payload["acceptance_id"], request)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(409, "ACCEPTANCE_CONFLICT", str(exc)) from None
+        return {"acceptance_id": record.acceptance_id, "fingerprint": record.fingerprint,
+                "status": record.status, "created": created}
+
+    def acceptance_authorize(self, payload: dict) -> dict:
+        if not isinstance(payload, dict) or set(payload) - {"acceptance_id", "ttl_seconds", "operator_authorized"}:
+            raise ApiError(400, "INVALID_ACCEPTANCE_AUTHORIZATION", "unsupported authorization fields")
+        if payload.get("operator_authorized") is not True:
+            raise ApiError(403, "OPERATOR_AUTHORIZATION_REQUIRED", "operator authorization is required")
+        try:
+            record = self._acceptance_store().authorize(payload.get("acceptance_id"), ttl_seconds=payload.get("ttl_seconds", 90))
+        except (TypeError, ValueError) as exc:
+            raise ApiError(409, "ACCEPTANCE_CONFLICT", str(exc)) from None
+        return {"acceptance_id": record.acceptance_id, "status": record.status,
+                "expires_at": record.result.get("expires_at")}
+
+    def acceptance_dispatch(self, payload: dict) -> dict:
+        if not isinstance(payload, dict) or set(payload) != {"acceptance_id"}:
+            raise ApiError(400, "INVALID_ACCEPTANCE_DISPATCH", "acceptance_id is required")
+        acceptance_id = payload["acceptance_id"]
+        store = self._acceptance_store()
+        prior = store.get(acceptance_id)
+        if prior is None:
+            raise ApiError(404, "ACCEPTANCE_NOT_FOUND", "paper acceptance reservation not found")
+        if prior.status != "AUTHORIZED":
+            # Result retrieval is replay-safe; no second invocation is possible.
+            return self.acceptance_status(acceptance_id)
+
+        # Verify all current execution attestations before persisting the
+        # irreversible dispatch boundary or releasing either gate.
+        status = self.inject.status_fn() if self.inject.status_fn is not None else self.status()
+        heartbeat = status.get("service_heartbeat") or {}
+        limits_before = self._risk_limits_fingerprint()
+        safe_mode = str(status.get("mode", "")).upper().replace(" ", "_") in {"PAPER", "PAPER_ONLY"}
+        heartbeat_ok = (heartbeat.get("present") is True and heartbeat.get("consistent") is True
+                        and heartbeat.get("age_seconds") is not None
+                        and 0 <= heartbeat.get("age_seconds") <= 30)
+        gates_ok = (safe_mode and status.get("broker_type") == "paper"
+                    and status.get("live_broker_available") is False
+                    and status.get("live_order_transport_available") is False
+                    and status.get("paper_run_enabled") is False and status.get("halted") is True
+                    and heartbeat_ok
+                    and os.environ.get("TRADINGAGENTS_SURVIVOR_AUTONOMY_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"})
+        if not gates_ok:
+            record = store.transition(acceptance_id, {"AUTHORIZED"}, "REJECTED",
+                                      {"reason": "safety_attestation_failed", "dispatch_performed": False})
+            return {"acceptance_id": record.acceptance_id, "status": record.status,
+                    "result": record.result, "dispatch_performed": False}
+        try:
+            store.mark_dispatched(acceptance_id)
+        except ValueError as exc:
+            raise ApiError(409, "ACCEPTANCE_CONFLICT", str(exc)) from None
+
+        from tradingagents.survivor.autonomy.halt import clear_halt, set_halt
+        from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
+        from tradingagents.survivor.execution.ledger import PaperLedger
+        cycle_result = None
+        cycle_error = None
+        halt_restored = False
+        restoration_status = {}
+        try:
+            ledger = PaperLedger(db_path=self.inject.paper_ledger_path)
+            before = ledger.events()
+            if not clear_halt((self.inject.config_overrides or {}).get("_halt_path")):
+                raise RuntimeError("HALT could not be released for authorized attempt")
+            kwargs = self._run_kwargs(dry=False)
+            kwargs["config"]["survivor_paper_enabled"] = True  # in-memory, one-call permit only
+            cycle = self.inject.cycle_fn or run_survivor_cycle
+            report = cycle(**kwargs)
+            # Verify production risk configuration remained unchanged and only
+            # record concrete append-only ledger evidence; never synthesize fills.
+            if self._risk_limits_fingerprint() != limits_before:
+                raise RuntimeError("risk limits changed during acceptance")
+            ledger.verify_chain()
+            after = ledger.events()
+            new_events = after[len(before):]
+            result = {"cycle_id": report.cycle_id, "cycle_status": report.status,
+                      "risk_decisions": report.risk_decisions, "approved": report.approved,
+                      "rejected": report.rejected, "paper_trades": report.paper_trades,
+                      "provider_usage_pence": report.ai_cost_pence,
+                      "ledger_event_ids": [event["event_id"] for event in new_events],
+                      "ledger_event_hashes": [event["event_hash"] for event in new_events],
+                      "ledger_chain_verified": True}
+            cycle_result = result
+        except Exception as exc:
+            # A cycle may have reached provider or ledger work. Never retry.
+            cycle_error = type(exc).__name__
+        finally:
+            try:
+                set_halt((self.inject.config_overrides or {}).get("_halt_path"))
+                restoration_status = self.status()
+                from tradingagents.survivor.autonomy.halt import is_halted
+                restored_halt = is_halted((self.inject.config_overrides or {}).get("_halt_path"))
+                heartbeat_after = restoration_status.get("service_heartbeat") or {}
+                halt_restored = (restored_halt is True and restoration_status.get("halted") is True
+                    and restoration_status.get("paper_run_enabled") is False
+                    and restoration_status.get("live_broker_available") is False
+                    and restoration_status.get("live_order_transport_available") is False
+                    and heartbeat_after.get("present") is True and heartbeat_after.get("consistent") is True
+                    and heartbeat_after.get("halted") is True)
+            except Exception:
+                # DISPATCHED is recovered to RECONCILIATION_REQUIRED on boot;
+                # leave the durable record intact and fail the API response.
+                logger.critical("failed to restore TradingAgents HALT after acceptance")
+        if not halt_restored or cycle_error:
+            safe_result = {"reason": cycle_error or "HALT_RESTORATION_FAILED", "operator_action_required": True,
+                           "halt_restored": halt_restored}
+            try:
+                store.transition(acceptance_id, {"DISPATCHED"}, "RECONCILIATION_REQUIRED", safe_result)
+            except Exception:
+                pass
+            raise ApiError(503, "RECONCILIATION_REQUIRED", "acceptance outcome is uncertain; operator reconciliation required")
+        record = store.transition(acceptance_id, {"DISPATCHED"}, "COMPLETED", cycle_result or {})
+        return {"acceptance_id": record.acceptance_id, "status": record.status,
+                "result": record.result, "dispatch_performed": True, "halt_restored": True,
+                "restoration": {"paper_opt_in_disabled": restoration_status.get("paper_run_enabled") is False,
+                    "live_broker_unavailable": restoration_status.get("live_broker_available") is False,
+                    "live_order_transport_unavailable": restoration_status.get("live_order_transport_available") is False,
+                    "heartbeat_consistent": (restoration_status.get("service_heartbeat") or {}).get("consistent") is True}}
+
+    @staticmethod
+    def _risk_limits_fingerprint() -> str:
+        import hashlib
+        import json
+        from dataclasses import asdict
+        from tradingagents.survivor.risk.limits import risk_limits_from_env
+        return hashlib.sha256(json.dumps(asdict(risk_limits_from_env()), sort_keys=True).encode()).hexdigest()
+
+    def recover_acceptances(self) -> None:
+        recovered = self._acceptance_store().recover_interrupted()
+        if recovered:
+            from tradingagents.survivor.autonomy.halt import set_halt
+            set_halt((self.inject.config_overrides or {}).get("_halt_path"))
+
     def health(self) -> dict:
         from tradingagents.survivor import is_survivor_enabled
 
@@ -106,6 +267,8 @@ class SurvivorHandlers:
         }
 
     def status(self) -> dict:
+        if self.inject.status_fn is not None:
+            return self.inject.status_fn()
         from tradingagents.llm_clients.usage_ledger import InferenceUsageLedger
         from tradingagents.survivor import is_survivor_enabled
         from tradingagents.survivor.autonomy import halt as halt_mod
@@ -359,17 +522,26 @@ class JarvisApp:
         ("POST", "/v1/run/dry"): "run_dry",
         ("POST", "/v1/run/paper"): "run_paper",
         ("POST", "/v1/halt"): "halt",
+        ("POST", "/v1/acceptance/reserve"): "acceptance_reserve",
+        ("POST", "/v1/acceptance/authorize"): "acceptance_authorize",
+        ("POST", "/v1/acceptance/dispatch"): "acceptance_dispatch",
     }
 
     def __init__(self, handlers: SurvivorHandlers, token: str):
         self.handlers = handlers
         self.token = token
 
-    def dispatch(self, method: str, path: str):
+    def dispatch(self, method: str, path: str, payload: dict | None = None):
         handler_name = self.ROUTES.get((method, path))
+        if method == "GET" and path.startswith("/v1/acceptance/"):
+            acceptance_id = path.removeprefix("/v1/acceptance/")
+            if not acceptance_id or "/" in acceptance_id:
+                raise ApiError(404, "NOT_FOUND", f"no endpoint {method} {path}")
+            return self.handlers.acceptance_status(acceptance_id)
         if handler_name is None:
             raise ApiError(404, "NOT_FOUND", f"no endpoint {method} {path}")
-        return getattr(self.handlers, handler_name)()
+        handler = getattr(self.handlers, handler_name)
+        return handler(payload or {}) if method == "POST" and path.startswith("/v1/acceptance/") else handler()
 
 
 class _JarvisRequestHandler(BaseHTTPRequestHandler):
@@ -399,7 +571,19 @@ class _JarvisRequestHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         try:
-            payload = self.server.app.dispatch(method, path)
+            payload = None
+            if method == "POST":
+                raw_length = self.headers.get("Content-Length", "0")
+                if not raw_length.isdigit() or int(raw_length) > 16384:
+                    raise ApiError(413, "REQUEST_TOO_LARGE", "request body exceeds the acceptance limit")
+                if int(raw_length):
+                    try:
+                        payload = json.loads(self.rfile.read(int(raw_length)))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        raise ApiError(400, "INVALID_JSON", "request body must be JSON") from None
+                    if not isinstance(payload, dict):
+                        raise ApiError(400, "INVALID_JSON", "request body must be an object")
+            payload = self.server.app.dispatch(method, path, payload)
         except ApiError as exc:
             self._send_json(exc.status, {"error": {"code": exc.code, "message": exc.message}})
             return
@@ -435,7 +619,8 @@ def make_server(
             halt_path=(resolved_inject.config_overrides or {}).get("_halt_path"),
         )
     server.service_heartbeat = resolved_inject.service_heartbeat
-    server.app = JarvisApp(SurvivorHandlers(resolved_inject), resolved_token)
+    resolved_handlers = SurvivorHandlers(resolved_inject)
+    server.app = JarvisApp(resolved_handlers, resolved_token)
     server.token = resolved_token
     server.daemon_threads = True
     return server
@@ -449,6 +634,7 @@ def serve(*, port: int = DEFAULT_PORT) -> None:
     sys.stderr.write(f"SURVIVOR jarvis localhost service on {host}:{bound_port} (bearer token {token_state})\n")
     sys.stderr.flush()
     try:
+        server.app.handlers.recover_acceptances()
         # The heartbeat belongs to this bound HTTP service process, not a
         # trading cycle or a standalone writer. Its identity is checked again
         # by every status read, and it stops/cleans up with this lifecycle.

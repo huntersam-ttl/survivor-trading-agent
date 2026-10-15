@@ -78,6 +78,15 @@ def _patch_provider_factory(monkeypatch):
     return captured
 
 
+def _use_hermetic_priced_openrouter(monkeypatch):
+    """Pin router tests to a catalog-priced model and a test-only credential."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "hermetic-test-key")
+    monkeypatch.setenv("SURVIVOR_OPENROUTER_DEFAULT_MODEL", "z-ai/glm-5.3")
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODEL", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_MODELS", raising=False)
+    monkeypatch.delenv("SURVIVOR_OPENROUTER_PRICING_MAP", raising=False)
+
+
 class _RunCtx:
     def __init__(self, run_id="run_guard"):
         self._run_id = run_id
@@ -199,6 +208,7 @@ def test_bound_tool_invocation_writes_usage_ledger(monkeypatch):
 
 @pytest.mark.unit
 def test_structured_output_invocation_writes_usage_ledger(monkeypatch):
+    _use_hermetic_priced_openrouter(monkeypatch)
     _patch_provider_factory(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         llm, router, ledger = _make_guarded_llm(tmpdir, role="portfolio_manager")
@@ -369,6 +379,7 @@ def test_openrouter_auth_key_reaches_provider_client(monkeypatch):
 def test_router_failure_surfaces_all_attempted_providers(monkeypatch):
     """The raised error must include EVERY attempted provider (the primary
     preferred-provider failure must not be masked by the last fallback's)."""
+    _use_hermetic_priced_openrouter(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         llm, router, _ = _make_guarded_llm(tmpdir)
         expected_routes = [pair[0] for pair in router.resolve_routes(llm.role)]

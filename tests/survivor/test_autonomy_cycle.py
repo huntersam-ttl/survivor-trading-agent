@@ -27,6 +27,10 @@ def _config(**over):
 
 
 def _cycle(tmp_path, adapter, monkeypatch, research_fn=None, **cfg):
+    # These cases exercise downstream cycle branches with isolated fake market
+    # data and temporary ledgers. Grant the test process the explicit opt-in
+    # locally instead of relying on an autouse fixture shared with other suites.
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true")
     monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
     monkeypatch.delenv("SURVIVOR_DRY_RUN", raising=False)  # hermetic dry-run state
     return run_survivor_cycle(
@@ -88,6 +92,7 @@ def test_external_halt_blocks_everything(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_overlap_lock_prevents_concurrent_cycles(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true")
     monkeypatch.setattr(halt_mod, "HALT_PATH", str(tmp_path / "HALT"))
     lock = CycleLock(lock_path=str(tmp_path / "cycle.lock"))
     assert lock.acquire() is True

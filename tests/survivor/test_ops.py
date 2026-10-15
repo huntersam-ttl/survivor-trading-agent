@@ -294,6 +294,9 @@ def test_security_selfcheck_fails_closed(tmp_path, monkeypatch):
 
 @pytest.mark.unit
 def test_critical_corruption_halts(tmp_path, monkeypatch):
+    # Reach the corrupted-ledger check with paper execution explicitly opted in
+    # inside this hermetic test; opt-in is otherwise fail-closed by default.
+    monkeypatch.setenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", "true")
     halt_path = str(tmp_path / "HALT")
     monkeypatch.setattr(halt_mod, "HALT_PATH", halt_path)
 

@@ -191,6 +191,12 @@ class SurvivorHandlers:
             kwargs["config"]["survivor_paper_enabled"] = True  # in-memory, one-call permit only
             cycle = self.inject.cycle_fn or run_survivor_cycle
             report = cycle(**kwargs)
+            report_counts = (report.risk_decisions, report.approved, report.rejected,
+                             report.paper_trades, report.ai_cost_pence)
+            if (any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    for value in report_counts)
+                    or report.approved + report.rejected != report.risk_decisions):
+                raise RuntimeError("cycle returned an invalid risk or accounting result")
             # Verify production risk configuration remained unchanged and only
             # record concrete append-only ledger evidence; never synthesize fills.
             if self._risk_limits_fingerprint() != limits_before:
@@ -198,6 +204,9 @@ class SurvivorHandlers:
             ledger.verify_chain()
             after = ledger.events()
             new_events = after[len(before):]
+            ledger_fills = sum(event.get("event_type") == "TRADE_EXECUTED" for event in new_events)
+            if report.paper_trades != ledger_fills:
+                raise RuntimeError("cycle trade count does not match appended PaperLedger evidence")
             result = {"cycle_id": report.cycle_id, "cycle_status": report.status,
                       "risk_decisions": report.risk_decisions, "approved": report.approved,
                       "rejected": report.rejected, "paper_trades": report.paper_trades,

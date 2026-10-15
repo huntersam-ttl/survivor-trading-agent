@@ -237,3 +237,10 @@ provision/configure the service's authenticated Jarvis bridge and the distinct
 Jarvis operator authorization privately, deploy both matching commits, and
 perform a new read-only preflight. Never clear a running HALT or enable
 runtime paper execution as part of deployment or health checking.
+
+Before recording a completed acceptance, the service validates nonnegative
+integer risk/accounting counters, requires `risk_decisions == approved +
+rejected`, and reconciles `paper_trades` against newly appended
+`TRADE_EXECUTED` events in the verified PaperLedger hash chain. Invalid or
+contradictory report data is durably marked reconciliation-required and cannot
+be replayed under the same acceptance ID.

@@ -109,3 +109,22 @@ def test_halt_restoration_failure_is_persisted_for_boot_recovery(tmp_path):
     record = handlers._acceptance_store().get(acceptance_id)
     assert record.status == "RECONCILIATION_REQUIRED"
     assert record.result["halt_restored"] is False
+
+
+def test_invalid_risk_result_fails_closed_and_cannot_be_replayed(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", raising=False)
+    halt_path = tmp_path / "HALT"
+    halt_path.write_text("HALT\n")
+    calls = []
+    invalid = SimpleNamespace(cycle_id="bad-risk", status="NO_TRADE", risk_decisions=-1,
+        approved=0, rejected=0, paper_trades=0, ai_cost_pence=0)
+    handlers = _handlers(tmp_path, lambda **_kwargs: calls.append(1) or invalid, halt_path=halt_path)
+    acceptance_id = "operator-acceptance-205"
+    handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
+    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True})
+    with pytest.raises(ApiError) as exc:
+        handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
+    assert exc.value.code == "RECONCILIATION_REQUIRED"
+    assert halt_path.exists() and calls == [1]
+    assert handlers.acceptance_dispatch({"acceptance_id": acceptance_id})["status"] == "RECONCILIATION_REQUIRED"
+    assert calls == [1]

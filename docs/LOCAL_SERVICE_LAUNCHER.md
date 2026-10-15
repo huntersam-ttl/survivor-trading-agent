@@ -306,6 +306,8 @@ consistent service heartbeat bound to PID 44939; no cycle heartbeat, cycles,
 or last-cycle timestamp; and `risk_state=ACTIVE`, effective
 `trading_state=HALTED`, `execution_eligible=false`. The PaperLedger and
 runtime databases passed SQLite integrity; its hash chain was valid with zero
-paper events/fills and zero runtime cycles. The active HALT file and captured
-risk-limit values were unchanged. This was status verification only: no
-provider request, cycle, order, fill, or ledger write occurred.
+paper events/fills and zero runtime cycles. The active HALT file was unchanged.
+The `paper-acceptance.db` passed SQLite integrity with zero reservations and
+zero incomplete acceptances. Risk-limit values were unchanged. This was
+status verification only: no provider request, cycle, order, fill, or ledger
+write occurred.

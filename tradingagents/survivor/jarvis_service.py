@@ -127,12 +127,13 @@ class SurvivorHandlers:
                 "status": record.status, "created": created}
 
     def acceptance_authorize(self, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"acceptance_id", "ttl_seconds", "operator_authorized"}:
+        if not isinstance(payload, dict) or set(payload) - {"acceptance_id", "ttl_seconds", "operator_authorized", "operator_identity"}:
             raise ApiError(400, "INVALID_ACCEPTANCE_AUTHORIZATION", "unsupported authorization fields")
-        if payload.get("operator_authorized") is not True:
+        if payload.get("operator_authorized") is not True or not isinstance(payload.get("operator_identity"), str):
             raise ApiError(403, "OPERATOR_AUTHORIZATION_REQUIRED", "operator authorization is required")
         try:
-            record = self._acceptance_store().authorize(payload.get("acceptance_id"), ttl_seconds=payload.get("ttl_seconds", 90))
+            record = self._acceptance_store().authorize(payload.get("acceptance_id"),
+                ttl_seconds=payload.get("ttl_seconds", 90), operator_identity=payload["operator_identity"])
         except (TypeError, ValueError) as exc:
             raise ApiError(409, "ACCEPTANCE_CONFLICT", str(exc)) from None
         return {"acceptance_id": record.acceptance_id, "status": record.status,
@@ -167,7 +168,7 @@ class SurvivorHandlers:
                     and os.environ.get("TRADINGAGENTS_SURVIVOR_AUTONOMY_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"})
         if not gates_ok:
             record = store.transition(acceptance_id, {"AUTHORIZED"}, "REJECTED",
-                                      {"reason": "safety_attestation_failed", "dispatch_performed": False})
+                                      {**prior.result, "reason": "safety_attestation_failed", "dispatch_performed": False})
             return {"acceptance_id": record.acceptance_id, "status": record.status,
                     "result": record.result, "dispatch_performed": False}
         try:
@@ -236,14 +237,15 @@ class SurvivorHandlers:
                 # leave the durable record intact and fail the API response.
                 logger.critical("failed to restore TradingAgents HALT after acceptance")
         if not halt_restored or cycle_error:
-            safe_result = {"reason": cycle_error or "HALT_RESTORATION_FAILED", "operator_action_required": True,
+            safe_result = {**prior.result, "reason": cycle_error or "HALT_RESTORATION_FAILED", "operator_action_required": True,
                            "halt_restored": halt_restored}
             try:
                 store.transition(acceptance_id, {"DISPATCHED"}, "RECONCILIATION_REQUIRED", safe_result)
             except Exception:
                 pass
             raise ApiError(503, "RECONCILIATION_REQUIRED", "acceptance outcome is uncertain; operator reconciliation required")
-        record = store.transition(acceptance_id, {"DISPATCHED"}, "COMPLETED", cycle_result or {})
+        record = store.transition(acceptance_id, {"DISPATCHED"}, "COMPLETED",
+                                  {**prior.result, **(cycle_result or {})})
         return {"acceptance_id": record.acceptance_id, "status": record.status,
                 "result": record.result, "dispatch_performed": True, "halt_restored": True,
                 "restoration": {"paper_opt_in_disabled": restoration_status.get("paper_run_enabled") is False,

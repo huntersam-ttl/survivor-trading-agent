@@ -67,7 +67,7 @@ def test_two_processes_cannot_claim_the_dispatch_boundary_twice(tmp_path):
     path = str(tmp_path / "dispatch.db")
     store = PaperAcceptanceStore(path)
     store.reserve("operator-acceptance-race-001", {"mode": "PAPER"})
-    store.authorize("operator-acceptance-race-001", ttl_seconds=60)
+    store.authorize("operator-acceptance-race-001", ttl_seconds=60, operator_identity="operator.test")
     barrier, output = ctx.Barrier(2), ctx.Queue()
     processes = [ctx.Process(target=_claim_dispatch, args=(path, barrier, output)) for _ in range(2)]
     for proc in processes:

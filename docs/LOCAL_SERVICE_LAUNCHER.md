@@ -244,3 +244,13 @@ rejected`, and reconciles `paper_trades` against newly appended
 `TRADE_EXECUTED` events in the verified PaperLedger hash chain. Invalid or
 contradictory report data is durably marked reconciliation-required and cannot
 be replayed under the same acceptance ID.
+
+The authenticated Jarvis authorization request includes a configured operator
+identity. TradingAgents validates its format and persists it with the
+time-limited permit through dispatch and reconciliation. The ID is an audit
+principal supplied by the separately authenticated Jarvis controller; the
+operator token itself is not transmitted to TradingAgents. Jarvis requires
+that token and the configured identity independently at its HTTP endpoint,
+then uses the existing bridge bearer token for service-to-service requests.
+Jarvis also compares the remote reservation fingerprint with its own before
+requesting authorization.

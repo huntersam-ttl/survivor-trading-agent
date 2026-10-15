@@ -19,6 +19,7 @@ from tradingagents.survivor.paths import runtime_dir
 
 DEFAULT_ACCEPTANCE_DB = os.path.join(runtime_dir(), "paper-acceptance.db")
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_OPERATOR_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{2,63}$")
 _TERMINAL = {"COMPLETED", "REJECTED", "UNCERTAIN", "RECONCILIATION_REQUIRED"}
 
 
@@ -116,11 +117,14 @@ class PaperAcceptanceStore:
             db.commit()
             return self._record(updated)
 
-    def authorize(self, acceptance_id: str, *, ttl_seconds: int = 90) -> AcceptanceRecord:
+    def authorize(self, acceptance_id: str, *, ttl_seconds: int = 90,
+                  operator_identity: str) -> AcceptanceRecord:
         if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 5 <= ttl_seconds <= 180:
             raise AcceptanceConflict("acceptance permit lifetime must be between 5 and 180 seconds")
+        if not isinstance(operator_identity, str) or not _OPERATOR_ID.fullmatch(operator_identity):
+            raise AcceptanceConflict("configured operator identity is invalid")
         permit = {"expires_at": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
-                  "operator_authorized_by_jarvis": True}
+                  "operator_authorized_by_jarvis": True, "operator_identity": operator_identity}
         return self.transition(acceptance_id, {"RESERVED"}, "AUTHORIZED", permit)
 
     def mark_dispatched(self, acceptance_id: str) -> AcceptanceRecord:
@@ -139,7 +143,8 @@ class PaperAcceptanceStore:
                 db.execute("UPDATE paper_acceptance SET status='REJECTED',result_json=?,updated_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE acceptance_id=? AND status='AUTHORIZED'",
                            (result, acceptance_id))
                 db.commit(); raise AcceptanceConflict("acceptance permit expired")
-            result = json.dumps({"dispatch_started": True}, sort_keys=True, separators=(",", ":"))
+            permit["dispatch_started"] = True
+            result = json.dumps(permit, sort_keys=True, separators=(",", ":"))
             cursor = db.execute("UPDATE paper_acceptance SET status='DISPATCHED',result_json=?,updated_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE acceptance_id=? AND status='AUTHORIZED'",
                                 (result, acceptance_id))
             if cursor.rowcount != 1:
@@ -159,7 +164,8 @@ class PaperAcceptanceStore:
                 except (TypeError, ValueError):
                     previous_result = {}
                 if row["status"] == "DISPATCHED":
-                    result = {"reason": "process_restart_after_dispatch", "operator_action_required": True}
+                    result = {**previous_result, "reason": "process_restart_after_dispatch",
+                              "operator_action_required": True}
                     db.execute("UPDATE paper_acceptance SET status='RECONCILIATION_REQUIRED',result_json=?,updated_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE acceptance_id=?",
                                (json.dumps(result, sort_keys=True), row["acceptance_id"]))
                 elif previous_result.get("halt_restored") is False:

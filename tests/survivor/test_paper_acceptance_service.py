@@ -64,9 +64,12 @@ def test_scoped_permit_runs_once_restores_halt_and_never_changes_global_optin(tm
     handlers = _handlers(tmp_path, cycle, halt_path=halt_path)
     payload = {"acceptance_id": "operator-acceptance-202", "request": {"mode": "PAPER_RUNTIME"}}
     handlers.acceptance_reserve(payload)
-    handlers.acceptance_authorize({"acceptance_id": payload["acceptance_id"], "operator_authorized": True})
+    handlers.acceptance_authorize({"acceptance_id": payload["acceptance_id"], "operator_authorized": True,
+                                   "operator_identity": "operator.test"})
+    assert handlers.acceptance_status(payload["acceptance_id"])["result"]["operator_identity"] == "operator.test"
     result = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
     assert result["status"] == "COMPLETED" and result["halt_restored"] is True
+    assert result["result"]["operator_identity"] == "operator.test"
     assert halt_path.exists() and is_paper_enabled() is False and len(calls) == 1
     replay = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
     assert replay["status"] == "COMPLETED" and len(calls) == 1
@@ -83,7 +86,8 @@ def test_ambiguous_cycle_and_restore_failure_never_replay(tmp_path, monkeypatch)
     handlers = _handlers(tmp_path, cycle, halt_path=halt_path)
     payload = {"acceptance_id": "operator-acceptance-203", "request": {"mode": "PAPER_RUNTIME"}}
     handlers.acceptance_reserve(payload)
-    handlers.acceptance_authorize({"acceptance_id": payload["acceptance_id"], "operator_authorized": True})
+    handlers.acceptance_authorize({"acceptance_id": payload["acceptance_id"], "operator_authorized": True,
+                                   "operator_identity": "operator.test"})
     with pytest.raises(ApiError) as exc:
         handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
     assert exc.value.code == "RECONCILIATION_REQUIRED"
@@ -101,7 +105,8 @@ def test_halt_restoration_failure_is_persisted_for_boot_recovery(tmp_path):
                          status=_status(halted=True), halt_path=impossible_halt)
     acceptance_id = "operator-acceptance-204"
     handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
-    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True})
+    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True,
+                                   "operator_identity": "operator.test"})
     with pytest.raises(ApiError) as exc:
         handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
     assert exc.value.code == "RECONCILIATION_REQUIRED"
@@ -121,7 +126,8 @@ def test_invalid_risk_result_fails_closed_and_cannot_be_replayed(tmp_path, monke
     handlers = _handlers(tmp_path, lambda **_kwargs: calls.append(1) or invalid, halt_path=halt_path)
     acceptance_id = "operator-acceptance-205"
     handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
-    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True})
+    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True,
+                                   "operator_identity": "operator.test"})
     with pytest.raises(ApiError) as exc:
         handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
     assert exc.value.code == "RECONCILIATION_REQUIRED"

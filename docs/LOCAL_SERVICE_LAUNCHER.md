@@ -286,3 +286,26 @@ state and was not treated as execution authorization. The new status contract
 reports this as `risk_state=ACTIVE`, effective `trading_state=HALTED`, and
 `execution_eligible=false` while HALT is active. No provider request or cycle
 was made during these checks.
+
+## Controlled LaunchAgent reload (2026-10-15)
+
+After commit `c49fc180240ce6911c22bec85033293c02134835` was pushed to the
+existing isolated feature branch, `com.tradingagents.survivor-paper` was
+reloaded with `launchctl kickstart -k`. The old PID 2488 exited and PID 44939
+now owns `127.0.0.1:8765`, running
+`/Users/cc/tradingagents-paper-attestation/.venv/bin/python -m
+tradingagents.survivor.jarvis_service --port 8765` from this worktree. A
+Python 3.12 environment probe resolves `tradingagents` to this checkout. The
+dedicated LaunchAgent and rollback snapshot remain separate from Jarvis and
+the original dirty TradingAgents checkout.
+
+The authenticated read-only `/v1/status` returned HTTP 200 in 83.7 ms. It
+reported PAPER ONLY; HALT active; paper opt-in false; autonomy false; concrete
+PaperBroker; both live broker and live order transport false; a fresh,
+consistent service heartbeat bound to PID 44939; no cycle heartbeat, cycles,
+or last-cycle timestamp; and `risk_state=ACTIVE`, effective
+`trading_state=HALTED`, `execution_eligible=false`. The PaperLedger and
+runtime databases passed SQLite integrity; its hash chain was valid with zero
+paper events/fills and zero runtime cycles. The active HALT file and captured
+risk-limit values were unchanged. This was status verification only: no
+provider request, cycle, order, fill, or ledger write occurred.

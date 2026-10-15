@@ -136,6 +136,37 @@ The focused provider and safety regression command is:
   tests/survivor/test_failclosed.py
 ```
 
-The recorded result before the controlled service reload was `99 passed,
-1 skipped`; the skip is the optional direct DeepSeek live test. The running
-service was not restarted for the provider probe or these offline tests.
+The recorded provider/safety regression result was `99 passed, 1 skipped`; the
+skip is the optional direct DeepSeek live test. Tests were run before service
+reload and made no provider requests or trading calls.
+
+## Controlled reload acceptance record
+
+On 2026-10-15, the dedicated LaunchAgent was reloaded after commit
+`b5d7f507a94de39e468826545cd9125c6f59924d`. Old PID `93036` exited after a
+LaunchAgent-targeted SIGTERM; new PID `91308` runs the committed
+`tradingagents.survivor.jarvis_service --port 8765` entrypoint from this
+worktree. The label reports `running`, with one service listener. No provider
+request was made during reload.
+
+Read-only status results after reload:
+
+| Probe | Result | Latency |
+| --- | --- | ---: |
+| TradingAgents `GET /v1/status` | HTTP 200, PAPER ONLY, HALT true, paper opt-in false, live broker and order transport false, cycle count 0 | 63.3 ms |
+| Jarvis `GET /api/trading/status` | HTTP 200, PAPER, opt-in false, live broker and order transport false | 117.6 ms |
+| Jarvis `GET /api/trading/supervisor` | HTTP 200, disabled, no last cycle | 2.2 ms |
+| Jarvis `GET /api/trading/supervisor/snapshot` | HTTP 200, PAPER, opt-in false, live broker and order transport false | 2202.3 ms |
+
+Jarvis PIDs remained unchanged at `52499` (port 8000) and `75930` (port 8010).
+TradingAgents still has no consistent heartbeat (`present=false`), so paper
+cycle preflight remains blocked even though the service and parser checks pass.
+The paper ledger passed SQLite integrity and hash-chain verification with zero
+events and zero `TRADE_EXECUTED` events; its genesis head and £20 starting
+balance remain unchanged. The status reports no positions and no last cycle.
+
+HALT remains present; paper opt-in is unset/false; autonomy remains disabled;
+dry run remains enabled. The launcher revalidated the captured risk limits
+before startup. No HALT change, opt-in change, trading cycle, or fill occurred.
+Pre- and post-reload redacted status records are kept outside the checkout in
+the owner-only `.jarvis/tradingagents-paper-attestation-service` directory.

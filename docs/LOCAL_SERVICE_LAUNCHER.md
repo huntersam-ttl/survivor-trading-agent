@@ -311,3 +311,43 @@ The `paper-acceptance.db` passed SQLite integrity with zero reservations and
 zero incomplete acceptances. Risk-limit values were unchanged. This was
 status verification only: no provider request, cycle, order, fill, or ledger
 write occurred.
+
+## Long-cycle acceptance acknowledgement and outcome (2026-10-16)
+
+The one authorized runtime attempt has been consumed under acceptance ID
+`paper-runtime-b1f5a5a058a64aec8cf4532d5e5686c1`. The local durable cycle
+record `736a207e0a5a` is `COMPLETED` with reason `NO_PROPOSAL`: three research
+attempts, zero successful research outputs, three inference failures, zero
+risk decisions, zero executions, and one pence total provider cost. The
+PaperLedger contains the previously recorded initial treasury event only; its
+chain verified and there are no trade events or fills. HALT remains active,
+paper opt-in remains disabled, and this repair did not restart the service or
+issue another cycle.
+
+Previously, the HTTP dispatch handler held the request open until research
+finished. It now commits the `DISPATCHED` boundary before starting one
+background worker and promptly returns the durable state. Repeated POSTs only
+read the existing record. Clients poll the authenticated acceptance GET route;
+a process restart converts unfinished dispatches to
+`RECONCILIATION_REQUIRED` and does not resume them. Provider failures and
+ledger evidence are persisted in the terminal result. A Jarvis Mission must
+still receive explicit operator review before it can be finalized.
+
+The three research-run records classify the failures as invalid OpenRouter
+model responses with no usable text or tool call. The available usage ledger
+does not reconcile with the cycle summary, so exact per-call usage attribution
+is unknown. No evidence identified timeouts, rate limits, or token limits.
+The parser continues to reject empty or unusable model output; no provider
+response was requested during this repair.
+
+Authenticated live status was not re-read during this pass because a protected
+process snapshot was accidentally surfaced while locating the credential
+source. Do not reuse that credential; rotate it through the approved secret
+path before future authenticated reconciliation. The completed remote record
+is therefore based on the earlier authenticated acceptance read plus current
+local durable data, and fresh live reconciliation remains outstanding.
+
+Verification on this code: `.venv/bin/python -m pytest -q` — **1,060 passed,
+2 skipped, 18 provider-model warnings, and 71 subtests passed**. Focused
+acceptance/store/content-normalization tests — **21 passed**. No provider
+request or service restart was made.

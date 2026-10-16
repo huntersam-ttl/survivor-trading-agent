@@ -25,6 +25,7 @@ import logging
 import os
 import secrets
 import sys
+import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -174,8 +175,37 @@ class SurvivorHandlers:
         try:
             store.mark_dispatched(acceptance_id)
         except ValueError as exc:
+            # A concurrent/replayed request can only observe the already
+            # claimed status; it must never invoke the worker a second time.
+            current = store.get(acceptance_id)
+            if current is not None and current.status in {"DISPATCHED", "COMPLETED", "RECONCILIATION_REQUIRED"}:
+                return self.acceptance_status(acceptance_id)
             raise ApiError(409, "ACCEPTANCE_CONFLICT", str(exc)) from None
 
+        worker = threading.Thread(target=self._execute_acceptance,
+            args=(acceptance_id, prior, limits_before), name=f"paper-acceptance-{acceptance_id[:12]}", daemon=True)
+        try:
+            worker.start()
+        except Exception:
+            # The durable claim remains consumed. Leave HALT set and mark the
+            # outcome uncertain; process restart recovery has the same rule.
+            try:
+                store.transition(acceptance_id, {"DISPATCHED"}, "RECONCILIATION_REQUIRED",
+                    {**prior.result, "reason": "worker_start_failed", "dispatch_performed": False,
+                     "halt_restored": True, "operator_action_required": True})
+            except Exception:
+                pass
+            raise ApiError(503, "RECONCILIATION_REQUIRED",
+                           "acceptance dispatch is reserved; operator reconciliation required") from None
+        # This acknowledgement is intentionally short. Clients poll the
+        # authenticated GET /v1/acceptance/{id}; POST is never repeated.
+        return self.acceptance_status(acceptance_id)
+
+    def _execute_acceptance(self, acceptance_id: str, prior, limits_before: str) -> None:
+        """Run the single claimed cycle off-request and persist its terminal evidence."""
+        store = self._acceptance_store()
+        claimed = store.get(acceptance_id)
+        base_result = claimed.result if claimed is not None else prior.result
         from tradingagents.survivor.autonomy.halt import clear_halt, set_halt
         from tradingagents.survivor.autonomy.cycle import run_survivor_cycle
         from tradingagents.survivor.execution.ledger import PaperLedger
@@ -209,8 +239,14 @@ class SurvivorHandlers:
             if report.paper_trades != ledger_fills:
                 raise RuntimeError("cycle trade count does not match appended PaperLedger evidence")
             result = {"cycle_id": report.cycle_id, "cycle_status": report.status,
+                      "cycle_reason": getattr(report, "reason", None),
                       "risk_decisions": report.risk_decisions, "approved": report.approved,
                       "rejected": report.rejected, "paper_trades": report.paper_trades,
+                      "research_attempts": getattr(report, "research_attempts", None),
+                      "research_successes": getattr(report, "research_successes", None),
+                      "research_failures": getattr(report, "research_failures", None),
+                      "research_inference_failed_count": getattr(report, "research_inference_failed_count", None),
+                      "outcome": getattr(report, "reason", None),
                       "provider_usage_pence": report.ai_cost_pence,
                       "ledger_event_ids": [event["event_id"] for event in new_events],
                       "ledger_event_hashes": [event["event_hash"] for event in new_events],
@@ -237,21 +273,20 @@ class SurvivorHandlers:
                 # leave the durable record intact and fail the API response.
                 logger.critical("failed to restore TradingAgents HALT after acceptance")
         if not halt_restored or cycle_error:
-            safe_result = {**prior.result, "reason": cycle_error or "HALT_RESTORATION_FAILED", "operator_action_required": True,
+            safe_result = {**base_result, "reason": cycle_error or "HALT_RESTORATION_FAILED", "operator_action_required": True,
                            "halt_restored": halt_restored}
             try:
                 store.transition(acceptance_id, {"DISPATCHED"}, "RECONCILIATION_REQUIRED", safe_result)
             except Exception:
                 pass
-            raise ApiError(503, "RECONCILIATION_REQUIRED", "acceptance outcome is uncertain; operator reconciliation required")
-        record = store.transition(acceptance_id, {"DISPATCHED"}, "COMPLETED",
-                                  {**prior.result, **(cycle_result or {})})
-        return {"acceptance_id": record.acceptance_id, "status": record.status,
-                "result": record.result, "dispatch_performed": True, "halt_restored": True,
-                "restoration": {"paper_opt_in_disabled": restoration_status.get("paper_run_enabled") is False,
-                    "live_broker_unavailable": restoration_status.get("live_broker_available") is False,
-                    "live_order_transport_unavailable": restoration_status.get("live_order_transport_available") is False,
-                    "heartbeat_consistent": (restoration_status.get("service_heartbeat") or {}).get("consistent") is True}}
+            return
+        store.transition(acceptance_id, {"DISPATCHED"}, "COMPLETED",
+                         {**base_result, **(cycle_result or {}), "dispatch_performed": True,
+                          "halt_restored": True,
+                          "restoration": {"paper_opt_in_disabled": restoration_status.get("paper_run_enabled") is False,
+                              "live_broker_unavailable": restoration_status.get("live_broker_available") is False,
+                              "live_order_transport_unavailable": restoration_status.get("live_order_transport_available") is False,
+                              "heartbeat_consistent": (restoration_status.get("service_heartbeat") or {}).get("consistent") is True}})
 
     @staticmethod
     def _risk_limits_fingerprint() -> str:

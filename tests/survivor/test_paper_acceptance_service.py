@@ -28,6 +28,17 @@ def _report():
                            approved=0, rejected=0, paper_trades=0, ai_cost_pence=0)
 
 
+def _wait_status(handlers, acceptance_id, expected, timeout=2.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = handlers.acceptance_status(acceptance_id)["status"]
+        if status == expected:
+            return status
+        time.sleep(.005)
+    return handlers.acceptance_status(acceptance_id)["status"]
+
+
 def test_acceptance_routes_require_bearer_and_replay_status_is_read_only(tmp_path):
     handlers = _handlers(tmp_path, lambda **_kwargs: _report())
     server = make_server(port=0, token="local-test-token", inject=handlers.inject)
@@ -68,11 +79,46 @@ def test_scoped_permit_runs_once_restores_halt_and_never_changes_global_optin(tm
                                    "operator_identity": "operator.test"})
     assert handlers.acceptance_status(payload["acceptance_id"])["result"]["operator_identity"] == "operator.test"
     result = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
-    assert result["status"] == "COMPLETED" and result["halt_restored"] is True
+    assert result["status"] in {"DISPATCHED", "COMPLETED"}
+    assert _wait_status(handlers, payload["acceptance_id"], "COMPLETED") == "COMPLETED"
+    result = handlers.acceptance_status(payload["acceptance_id"])
+    assert result["result"]["halt_restored"] is True
     assert result["result"]["operator_identity"] == "operator.test"
     assert halt_path.exists() and is_paper_enabled() is False and len(calls) == 1
     replay = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
     assert replay["status"] == "COMPLETED" and len(calls) == 1
+
+
+def test_long_cycle_returns_bounded_ack_and_duplicate_post_only_polls(tmp_path, monkeypatch):
+    import threading
+    import time
+    monkeypatch.delenv("TRADINGAGENTS_SURVIVOR_PAPER_ENABLED", raising=False)
+    halt_path = tmp_path / "HALT"
+    halt_path.write_text("HALT\n")
+    entered, release, calls = threading.Event(), threading.Event(), []
+    def cycle(**_kwargs):
+        calls.append(1)
+        entered.set()
+        assert release.wait(2)
+        return _report()
+    handlers = _handlers(tmp_path, cycle, halt_path=halt_path)
+    acceptance_id = "operator-acceptance-async"
+    handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
+    handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True,
+                                   "operator_identity": "operator.test"})
+    started = time.monotonic()
+    ack = handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
+    assert time.monotonic() - started < .5
+    assert ack["status"] == "DISPATCHED"
+    assert entered.wait(1)
+    duplicate = handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
+    assert duplicate["status"] == "DISPATCHED" and calls == [1]
+    release.set()
+    assert _wait_status(handlers, acceptance_id, "COMPLETED") == "COMPLETED"
+    final = handlers.acceptance_status(acceptance_id)
+    assert final["result"]["dispatch_started"] is True
+    assert final["result"]["dispatch_performed"] is True
+    assert len(calls) == 1 and halt_path.exists()
 
 
 def test_ambiguous_cycle_and_restore_failure_never_replay(tmp_path, monkeypatch):
@@ -88,9 +134,9 @@ def test_ambiguous_cycle_and_restore_failure_never_replay(tmp_path, monkeypatch)
     handlers.acceptance_reserve(payload)
     handlers.acceptance_authorize({"acceptance_id": payload["acceptance_id"], "operator_authorized": True,
                                    "operator_identity": "operator.test"})
-    with pytest.raises(ApiError) as exc:
-        handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
-    assert exc.value.code == "RECONCILIATION_REQUIRED"
+    ack = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
+    assert ack["status"] == "DISPATCHED"
+    assert _wait_status(handlers, payload["acceptance_id"], "RECONCILIATION_REQUIRED") == "RECONCILIATION_REQUIRED"
     assert halt_path.exists()
     replay = handlers.acceptance_dispatch({"acceptance_id": payload["acceptance_id"]})
     assert replay["status"] == "RECONCILIATION_REQUIRED" and calls == [1]
@@ -107,9 +153,9 @@ def test_halt_restoration_failure_is_persisted_for_boot_recovery(tmp_path):
     handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
     handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True,
                                    "operator_identity": "operator.test"})
-    with pytest.raises(ApiError) as exc:
-        handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
-    assert exc.value.code == "RECONCILIATION_REQUIRED"
+    ack = handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
+    assert ack["status"] == "DISPATCHED"
+    assert _wait_status(handlers, acceptance_id, "RECONCILIATION_REQUIRED") == "RECONCILIATION_REQUIRED"
     assert calls == []
     record = handlers._acceptance_store().get(acceptance_id)
     assert record.status == "RECONCILIATION_REQUIRED"
@@ -128,9 +174,9 @@ def test_invalid_risk_result_fails_closed_and_cannot_be_replayed(tmp_path, monke
     handlers.acceptance_reserve({"acceptance_id": acceptance_id, "request": {"mode": "PAPER_RUNTIME"}})
     handlers.acceptance_authorize({"acceptance_id": acceptance_id, "operator_authorized": True,
                                    "operator_identity": "operator.test"})
-    with pytest.raises(ApiError) as exc:
-        handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
-    assert exc.value.code == "RECONCILIATION_REQUIRED"
+    ack = handlers.acceptance_dispatch({"acceptance_id": acceptance_id})
+    assert ack["status"] == "DISPATCHED"
+    assert _wait_status(handlers, acceptance_id, "RECONCILIATION_REQUIRED") == "RECONCILIATION_REQUIRED"
     assert halt_path.exists() and calls == [1]
     assert handlers.acceptance_dispatch({"acceptance_id": acceptance_id})["status"] == "RECONCILIATION_REQUIRED"
     assert calls == [1]

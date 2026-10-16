@@ -351,3 +351,56 @@ Verification on this code: `.venv/bin/python -m pytest -q` — **1,060 passed,
 2 skipped, 18 provider-model warnings, and 71 subtests passed**. Focused
 acceptance/store/content-normalization tests — **21 passed**. No provider
 request or service restart was made.
+# Security recovery and isolated deployment verification (2026-10-17)
+
+The exposed value was `SURVIVOR_JARVIS_TOKEN`, the local bearer credential for
+Jarvis-to-TradingAgents requests. It was replaced in the protected process
+snapshot, the isolated Jarvis service environment, and the private stack
+environment. Each file remains owner-only (`0600`); the new values match, and
+the old token is rejected by the reloaded service with HTTP 401. The dedicated
+OpenRouter key was not present in the exposed process snapshot and remains in
+its existing protected `.env`. No credential value or environment snapshot is
+part of this repository.
+
+The existing LaunchAgent and rollback procedure were used. The service moved
+from PID `44939` to PID `48800` on `127.0.0.1:8765`, running this checkout with
+Python `3.12.13` at commit
+`2d99d9d185d2903281224b64f08bc5505a1e2cdc`. Authenticated read-only
+`/v1/status` returned HTTP 200 for the replacement credential and HTTP 401 for
+the retired credential. Its process-bound liveness heartbeat was fresh,
+consistent, and bound to PID `48800`; the separate cycle heartbeat remained
+at `2026-10-16T14:50:15.997267+00:00`.
+
+Post-reload safety state: PAPER ONLY; concrete PaperBroker; HALT active;
+`TRADINGAGENTS_SURVIVOR_PAPER_ENABLED` false; autonomy false; dry-run true;
+live broker unavailable; live order transport unavailable; risk limits match
+the protected startup snapshot. The launcher `--check` performed no provider
+request. The private runtime databases passed SQLite integrity checks; the
+PaperLedger hash chain is valid with one `TREASURY_INITIALIZED` event and no
+fills. One historical runtime cycle is recorded, and no cycle was added during
+reload.
+
+The historical acceptance remains `COMPLETED` in the remote reservation
+store, but its result still says `cycle_status=ACTIVE` while the independent
+runtime database records cycle `736a207e0a5a` as `COMPLETED/NO_PROPOSAL`. The
+cycle contains three failed research runs (`InvalidModelResponseError`), zero
+risk decisions, and zero executions. The remote result lacks durable
+`dispatch_performed`, `halt_restored`, and dispatch-count fields; its only
+ledger reference is treasury initialization. Therefore Jarvis's canonical
+Mission remains `RECONCILIATION_REQUIRED`. It has not been promoted to
+success, and exact HTTP dispatch count remains unproven pending operator
+review.
+
+The persisted model failures indicate invalid or unusable response content;
+the available metadata does not establish a timeout, rate limit, or token
+limit. One usage record reports successful provider transport despite the
+research run failing validation, so HTTP/provider success is not treated as a
+valid trading decision. Existing parsing rejects unusable output. No provider
+request or trading cycle was made during reload.
+
+Regression verification: focused provider/acceptance/bridge/execution-boundary
+tests `55 passed`; full TradingAgents suite `1060 passed, 2 skipped, 18
+warnings, 71 subtests passed`. Jarvis and its full regression results are recorded in its
+isolated acceptance documentation. Jarvis port `8010` reloaded from PID `45493`
+to `49056`; main Jarvis port `8000` stayed at PID `52499`. No order or fill
+occurred. HALT remains active and paper opt-in remains disabled.
